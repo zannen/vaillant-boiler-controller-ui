@@ -40,11 +40,17 @@ On the Pi:
 
 ```sh
 sudo apt install ./vaillant-boiler-ui_*_all.deb
-# -c only if the file is empty or missing
-sudo htpasswd -B -C 6 /etc/vaillant-boiler-ui/users.htpasswd YOUR_ADMIN_USER
-sudo nano /etc/vaillant-boiler-ui/roles     # add YOUR_ADMIN_USER to the admin: line
-sudo systemctl start vaillant-boiler-ui
 ```
+
+On first install it creates a login `admin` (role admin) with a random password, prints the
+password once, and starts the service. Change the password, or add more users, with:
+
+```sh
+sudo htpasswd -B -C 6 /etc/vaillant-boiler-ui/users.htpasswd admin
+sudo nano /etc/vaillant-boiler-ui/roles     # roles for any new users
+```
+
+The printed password is also kept in apt's log, `/var/log/apt/term.log`, so change it after installing.
 
 The package installs:
 
