@@ -1392,6 +1392,28 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 #logout { background: var(--bg); color: var(--text2); border: 1px solid var(--axis); border-radius: 6px;
           padding: 2px 10px; font: inherit; cursor: pointer; }
 #logout:hover { color: var(--text); }
+.btn { background: var(--bg); color: var(--text2); border: 1px solid var(--axis); border-radius: 6px;
+       padding: 3px 10px; font: inherit; cursor: pointer; }
+.btn:hover:not(:disabled) { color: var(--text); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn.primary { background: var(--s1); border-color: var(--s1); color: #fff; }
+.btn.small { padding: 0 7px; font-size: 12px; }
+.err { color: var(--bad); }
+#sched-status.bad { color: var(--bad); }
+.srow { display: grid; grid-template-columns: 44px 1fr minmax(120px, 34%); gap: 10px; align-items: center; padding: 3px 0; }
+.srow .day { color: var(--text2); }
+.srow .day.today { color: var(--text); font-weight: 600; }
+.srow .times { color: var(--text2); font-size: 13px; font-variant-numeric: tabular-nums; }
+.strip { position: relative; height: 14px; background: var(--track); border-radius: 3px; }
+.strip span { position: absolute; top: 0; bottom: 0; background: var(--on); border-radius: 2px; min-width: 2px; }
+.strip i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); }
+.hours { position: relative; height: 14px; font-size: 11px; color: var(--muted); }
+.hours span { position: absolute; transform: translateX(-50%); }
+.eday { display: grid; grid-template-columns: 44px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid #252b33; }
+.eday .periods { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.period { display: inline-flex; gap: 4px; align-items: center; }
+.period input { background: var(--bg); color: var(--text); border: 1px solid var(--axis); border-radius: 4px;
+                padding: 1px 4px; font: inherit; color-scheme: dark; }
 .chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart .lane { fill: var(--track); }
 .chart .run { fill: var(--on); }
@@ -1433,6 +1455,27 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
     <span class="kv">Last update <b id="age">—</b></span>
     <span class="kv" id="who"></span>
     <button id="logout" type="button">Log out</button>
+  </section>
+
+  <section class="card" id="sched">
+    <div class="bar">
+      <h2>Heating schedule</h2>
+      <span class="kv" id="sched-status">—</span>
+      <button id="sched-edit" class="btn" type="button" hidden>Edit</button>
+    </div>
+    <div id="sched-view"></div>
+    <form id="sched-form" hidden>
+      <label class="kv"><input type="checkbox" id="sched-enabled">
+        Schedule enabled (when disabled, the boiler follows its own controls)</label>
+      <div id="sched-days"></div>
+      <div class="bar">
+        <button class="btn primary" type="submit">Save</button>
+        <button class="btn" type="button" id="sched-cancel">Cancel</button>
+        <span class="err" id="sched-err" role="alert"></span>
+      </div>
+    </form>
+    <div class="note">Heating runs only while the boiler's own timer is also on; the schedule can switch it off,
+      not on. An off time of 00:00 means midnight at the end of the day.</div>
   </section>
 
   <section class="card">
@@ -1969,6 +2012,181 @@ winSel.addEventListener("change", () => {
   scheduleDraw();
 });
 
+// ---------------------------------------------------------------- heating schedule
+// Everyone sees it; admins get an editor. The server checks the role again on save.
+const DAY_LABELS = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+const JS_DAY = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+let sched = null, editing = false, control = null;
+
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+const minutes = t => +t.slice(0, 2) * 60 + +t.slice(3);
+
+function loadSchedule() {
+  if (editing) return;
+  api("/api/schedule").then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || editing) return;
+    sched = d;
+    if (d.status) control = d.status;
+    renderSchedule();
+  }).catch(() => {});
+}
+
+function renderSchedule() {
+  const view = document.getElementById("sched-view");
+  document.getElementById("sched-edit").hidden = editing || !sched || (getAuth() || {}).role !== "admin";
+  showControl(control);
+  if (!sched) return;
+  const now = new Date(), today = JS_DAY[now.getDay()], nowMin = now.getHours() * 60 + now.getMinutes();
+  const rows = [];
+  const hours = el("div", "hours");
+  for (const h of [0, 3, 6, 9, 12, 15, 18, 21, 24]) {
+    const s = el("span", null, String(h).padStart(2, "0"));
+    s.style.left = (h / 24 * 100) + "%";
+    hours.append(s);
+  }
+  const head = el("div", "srow");
+  head.append(el("span"), hours, el("span"));
+  rows.push(head);
+  for (const day of sched.dayOrder) {
+    const row = el("div", "srow");
+    const strip = el("div", "strip");
+    for (const [on, off] of sched.days[day]) {
+      const s = el("span");
+      s.style.left = (minutes(on) / 1440 * 100) + "%";
+      s.style.width = ((minutes(off) - minutes(on)) / 1440 * 100) + "%";
+      s.title = `${on}–${off}`;
+      strip.append(s);
+    }
+    if (day === today) {
+      const mark = el("i");
+      mark.style.left = (nowMin / 1440 * 100) + "%";
+      mark.title = "now";
+      strip.append(mark);
+    }
+    const periods = sched.days[day];
+    row.append(el("span", "day" + (day === today ? " today" : ""), DAY_LABELS[day]), strip,
+               el("span", "times", periods.length ? periods.map(p => p.join("–")).join(", ") : "off all day"));
+    rows.push(row);
+  }
+  view.replaceChildren(...rows);
+  view.style.opacity = sched.enabled ? "" : "0.45";
+}
+
+function showControl(c) {
+  control = c;
+  const out = document.getElementById("sched-status");
+  if (!c) { out.textContent = "—"; return; }
+  const fmt = iso => {
+    const d = new Date(iso);
+    return `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${clock(d.getTime())}`;
+  };
+  const parts = [];
+  if (!c.enabled) parts.push("disabled: the boiler follows its own controls");
+  else {
+    parts.push(`heating ${c.target === "on" ? "allowed" : "blocked"} now`);
+    parts.push(c.nextChange ? `until ${fmt(c.nextChange)}` : "all week");
+  }
+  const s = c.lastSend;
+  if (s) parts.push(`last sent ${s.time.slice(11, 19)}: heating ${s.state} ${s.ok ? "✓" : "failed (" + s.result + ")"}`);
+  out.textContent = parts.join(" · ");
+  out.classList.toggle("bad", !!(s && !s.ok));
+}
+
+function periodRow(on = "", off = "") {
+  const p = el("span", "period");
+  const a = el("input"), b = el("input"), x = el("button", "btn small", "✕");
+  a.type = b.type = "time";
+  a.required = b.required = true;
+  a.value = on;
+  b.value = off === "24:00" ? "00:00" : off;
+  a.setAttribute("aria-label", "on");
+  b.setAttribute("aria-label", "off");
+  x.type = "button";
+  x.title = "remove";
+  x.addEventListener("click", () => { const box = p.parentElement; p.remove(); updateAdd(box); });
+  p.append(a, el("span", "note", "–"), b, x);
+  return p;
+}
+
+function updateAdd(box) {
+  box.querySelector(".add").disabled = box.querySelectorAll(".period").length >= sched.maxPeriods;
+}
+
+function readDay(box) {
+  return [...box.querySelectorAll(".period")].map(p => {
+    const [a, b] = p.querySelectorAll("input");
+    return [a.value, b.value === "00:00" ? "24:00" : b.value];
+  });
+}
+
+function openEditor() {
+  editing = true;
+  document.getElementById("sched-enabled").checked = sched.enabled;
+  const days = sched.dayOrder.map(day => {
+    const row = el("div", "eday"), box = el("div", "periods");
+    box.dataset.day = day;
+    for (const [on, off] of sched.days[day]) box.append(periodRow(on, off));
+    const add = el("button", "btn small add", "+ add"), copy = el("button", "btn small", "copy to all days");
+    add.type = copy.type = "button";
+    add.addEventListener("click", () => { add.before(periodRow()); updateAdd(box); });
+    copy.addEventListener("click", () => {
+      const periods = readDay(box);
+      for (const other of document.querySelectorAll("#sched-days .periods")) {
+        if (other === box) continue;
+        other.querySelectorAll(".period").forEach(p => p.remove());
+        const otherAdd = other.querySelector(".add");
+        for (const [on, off] of periods) otherAdd.before(periodRow(on, off));
+        updateAdd(other);
+      }
+    });
+    box.append(add, copy);
+    row.append(el("span", "day", DAY_LABELS[day]), box);
+    updateAdd(box);
+    return row;
+  });
+  document.getElementById("sched-days").replaceChildren(...days);
+  document.getElementById("sched-err").textContent = "";
+  document.getElementById("sched-view").hidden = true;
+  document.getElementById("sched-form").hidden = false;
+  renderSchedule();
+}
+
+function closeEditor() {
+  editing = false;
+  document.getElementById("sched-form").hidden = true;
+  document.getElementById("sched-view").hidden = false;
+  renderSchedule();
+}
+
+document.getElementById("sched-edit").addEventListener("click", openEditor);
+document.getElementById("sched-cancel").addEventListener("click", closeEditor);
+document.getElementById("sched-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const days = {};
+  for (const box of document.querySelectorAll("#sched-days .periods")) days[box.dataset.day] = readDay(box);
+  const err = document.getElementById("sched-err");
+  err.textContent = "saving…";
+  api("/api/schedule", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: document.getElementById("sched-enabled").checked, days }),
+  }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `save failed (${r.status})`);
+    sched = d;
+    if (d.status) control = d.status;
+    closeEditor();
+  }).catch(ex => { err.textContent = ex.message; });
+});
+
+loadSchedule();
+setInterval(loadSchedule, 60000);  // picks up edits made elsewhere
+setInterval(() => { if (!editing) renderSchedule(); }, 60000);  // move the "now" mark
+
 // ---------------------------------------------------------------- change list
 const log = document.getElementById("log");
 function addChange(c) {
@@ -2084,6 +2302,7 @@ function onMessage(ev) {
   const m = JSON.parse(ev.data);
   if (m.type === "ping") return;
   if (m.type === "change") { addChange(m); return; }
+  if (m.type === "control") { showControl(m.control); return; }
   if (m.type === "bucket") {
     const tier = tiers.find(t => t.name === m.tier);
     if (tier) { addBucket(tier, m.row); scheduleDraw(); }
@@ -2098,6 +2317,7 @@ function onMessage(ev) {
     samples = m.history;
     historyMinutes = m.historyMinutes;
     tiers = (m.tiers || []).map(t => ({ ...t, rows: null, loading: false, buffer: [], retryAt: 0 }));
+    showControl(m.control);
     buildWindows();
   } else if (m.sample) {
     samples.push(m.sample);
