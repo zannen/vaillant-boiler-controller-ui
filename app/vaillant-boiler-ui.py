@@ -455,7 +455,17 @@ class Ebusd:
         self.f = self.sock.makefile("rw", newline="\n")
 
     def read(self, name):
-        self.f.write(f"read -f -c bai {name}\n")
+        return self.command(f"read -f -c bai {name}")
+
+    def write(self, name, value):
+        """Write a message; ebusd answers "done" or "empty" on success, "ERR: ..." on failure."""
+        return self.command(f"write -c bai {name} {value}")
+
+    def close(self):
+        self.sock.close()
+
+    def command(self, line):
+        self.f.write(line + "\n")
         self.f.flush()
         lines = []
         while True:  # ebusd ends each response with an empty line
@@ -466,6 +476,199 @@ class Ebusd:
             if not line:
                 return " ".join(lines)
             lines.append(line)
+
+
+# ---------------------------------------------------------------- heating schedule
+
+DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # datetime.weekday() order
+MAX_PERIODS = 10  # on/off pairs per day
+
+
+def parse_hhmm(text, allow_2400=False):
+    """Minutes since midnight for "HH:MM", or None. "24:00" (end of day) only if allowed."""
+    if not isinstance(text, str) or len(text) != 5 or text[2] != ":":
+        return None
+    try:
+        h, m = int(text[:2]), int(text[3:])
+    except ValueError:
+        return None
+    if allow_2400 and (h, m) == (24, 0):
+        return 1440
+    return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
+
+
+def hhmm(minutes):
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def validate_schedule(obj):
+    """Checked, normalised copy of a schedule from the web page, or (None, error message)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("enabled"), bool) or not isinstance(obj.get("days"), dict):
+        return None, 'expected {"enabled": true|false, "days": {"mon": [["06:30", "08:30"], ...], ...}}'
+    unknown = set(obj["days"]) - set(DAY_KEYS)
+    if unknown:
+        return None, f"unknown day(s): {', '.join(sorted(unknown))}"
+    days = {}
+    for day in DAY_KEYS:
+        periods = obj["days"].get(day, [])
+        if not isinstance(periods, list) or len(periods) > MAX_PERIODS:
+            return None, f"{day}: at most {MAX_PERIODS} on/off periods"
+        spans = []
+        for p in periods:
+            if not (isinstance(p, list) and len(p) == 2):
+                return None, f"{day}: each period must be [on, off]"
+            on, off = parse_hhmm(p[0]), parse_hhmm(p[1], allow_2400=True)
+            if on is None or off is None:
+                return None, f"{day}: times must be HH:MM (off may be 24:00), got {p[0]!r}-{p[1]!r}"
+            if on >= off:
+                return None, f"{day}: {p[0]}-{p[1]}: on must be before off (use 24:00 for midnight)"
+            spans.append((on, off))
+        spans.sort()
+        for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+            if b0 < a1:
+                return None, f"{day}: {hhmm(a0)}-{hhmm(a1)} overlaps {hhmm(b0)}-{hhmm(b1)}"
+        days[day] = [[hhmm(a), hhmm(b)] for a, b in spans]
+    return {"enabled": obj["enabled"], "days": days}, None
+
+
+class Schedule:
+    """7-day heating schedule, kept in a JSON file and saved atomically."""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = {"enabled": False, "days": {d: [] for d in DAY_KEYS}, "updatedBy": None, "updatedAt": None}
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    saved = json.load(f)
+                checked, err = validate_schedule(saved)
+                if err:
+                    raise ValueError(err)
+                self.data = {**checked, "updatedBy": saved.get("updatedBy"), "updatedAt": saved.get("updatedAt")}
+            except (OSError, ValueError) as e:
+                sys.exit(f"cannot use schedule {path}: {e}; fix or delete it")
+
+    def get(self):
+        with self.lock:
+            return json.loads(json.dumps(self.data))
+
+    def set(self, checked, user):
+        data = {**checked, "updatedBy": user, "updatedAt": stamp()}
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
+        with self.lock:
+            self.data = data
+        return self.get()
+
+    def wanted(self, when):
+        """True if heating should be allowed at this (local) time, False if not, None if disabled."""
+        with self.lock:
+            if not self.data["enabled"]:
+                return None
+            m = when.hour * 60 + when.minute
+            return any(parse_hhmm(a) <= m < parse_hhmm(b, True) for a, b in self.data["days"][DAY_KEYS[when.weekday()]])
+
+    def next_change(self, when):
+        """Local time at which wanted() next changes, or None (always on, always off, or disabled)."""
+        now = self.wanted(when)
+        if now is None:
+            return None
+        with self.lock:
+            days = self.data["days"]
+        midnight = when.replace(hour=0, minute=0, second=0, microsecond=0)
+        edges = sorted(
+            midnight + datetime.timedelta(days=d, minutes=parse_hhmm(t, True))
+            for d in range(8)
+            for p in days[DAY_KEYS[(when.weekday() + d) % 7]]
+            for t in p
+        )
+        for t in edges:
+            if t > when and self.wanted(t) != now:
+                return t
+        return None
+
+
+class HeatingController(threading.Thread):
+    """Applies the schedule by telling the boiler, over eBUS, to block or allow central heating.
+
+    The block only lasts about 15 minutes after the last SetMode message, so the current state
+    is re-sent every RESEND_SECONDS. A change of state is sent at once. When the schedule is
+    disabled, heating is allowed once, and then the boiler goes back to its own controls.
+    The boiler's own timer still applies: the Pi can stop heating, but cannot start it while
+    that timer is off.
+    """
+
+    CHECK_SECONDS = 15
+    RESEND_SECONDS = 600
+    RETRY_SECONDS = 60
+
+    def __init__(self, schedule, hub, host, port, flow_temp, hwc_temp):
+        super().__init__(daemon=True)
+        self.schedule, self.hub, self.host, self.port = schedule, hub, host, port
+        self.flow_temp, self.hwc_temp = flow_temp, hwc_temp
+        self.wake = threading.Event()
+        self.sent = None        # "on"/"off" last confirmed by ebusd, or None
+        self.sent_at = 0.0      # monotonic time of that send
+        self.attempt_at = 0.0   # monotonic time of the last attempt (success or not)
+        self.last = None        # {"time", "state", "ok", "result"} of the last attempt
+
+    def setmode(self, off):
+        return f"auto;{self.flow_temp:g};{self.hwc_temp:g};-;{int(off)};0;0;0;0;0"
+
+    def send(self, state):
+        self.attempt_at = time.monotonic()
+        try:
+            bus = Ebusd(self.host, self.port)
+            try:
+                result = bus.write("SetMode", self.setmode(state == "off"))
+            finally:
+                bus.close()
+            ok = not result.startswith("ERR")
+        except (OSError, ConnectionError) as e:
+            result, ok = f"ERR: {e}", False
+        self.last = {"time": stamp(), "state": state, "ok": ok, "result": result}
+        if ok:
+            if state != self.sent:
+                self.hub.record("HeatingSchedule", state, stamp())
+            self.sent, self.sent_at = state, self.attempt_at
+        else:
+            print(f"{datetime.datetime.now():%H:%M:%S} SetMode heating {state} failed: {result}", file=sys.stderr)
+        return ok
+
+    def step(self):
+        now = datetime.datetime.now()
+        wanted = self.schedule.wanted(now)
+        target = None if wanted is None else ("on" if wanted else "off")
+        mono = time.monotonic()
+        retry_ok = self.last is None or self.last["ok"] or mono - self.attempt_at >= self.RETRY_SECONDS
+        if target is None:
+            if self.sent == "off" and retry_ok:  # schedule switched off: release the block once
+                if self.send("on"):
+                    self.sent = None
+        elif (target != self.sent or mono - self.sent_at >= self.RESEND_SECONDS) and retry_ok:
+            self.send(target)
+        nxt = self.schedule.next_change(now)
+        self.hub.set_control({
+            "enabled": wanted is not None,
+            "target": target,
+            "nextChange": nxt.isoformat(timespec="minutes") if nxt else None,
+            "lastSend": self.last,
+            "resendSeconds": self.RESEND_SECONDS,
+        })
+
+    def run(self):
+        while True:
+            try:
+                self.step()
+            except Exception as e:  # never let the controller die quietly
+                print(f"{datetime.datetime.now():%H:%M:%S} heating controller error: {e!r}", file=sys.stderr)
+            self.wake.wait(self.CHECK_SECONDS)
+            self.wake.clear()
 
 
 class FileWriter(threading.Thread):
@@ -540,6 +743,14 @@ class Hub:
         self.connected = False
         self.updated = None
         self.writer = writer
+        self.control = None  # heating controller status
+
+    def set_control(self, status):
+        with self.lock:
+            if status == self.control:
+                return
+            self.control = status
+            self._broadcast({"type": "control", "control": status})
 
     def snapshot(self):  # caller holds the lock
         return {
@@ -554,6 +765,7 @@ class Hub:
             "historyMinutes": self.history_minutes,
             "history": list(self.history),
             "tiers": [a.info() for a in self.aggs],
+            "control": self.control,
         }
 
     def agg_rows(self, name):
@@ -845,8 +1057,9 @@ SECURITY_HEADERS = {
 }
 
 
-def serve(hub, auth, bind, port):
+def serve(hub, auth, controller, bind, port):
     started = time.time()
+    schedule = controller.schedule
 
     class Handler(BaseHTTPRequestHandler):
         # path -> (method name, permission needed); None = no token needed
@@ -860,6 +1073,8 @@ def serve(hub, auth, bind, port):
             ("GET", "/api/state"): ("_state", "read"),
             ("GET", "/api/agg"): ("_agg", "read"),
             ("GET", "/api/events"): ("_events", "read"),
+            ("GET", "/api/schedule"): ("_get_schedule", "read"),
+            ("PUT", "/api/schedule"): ("_put_schedule", "admin"),
         }
 
         def do_GET(self):
@@ -867,6 +1082,9 @@ def serve(hub, auth, bind, port):
 
         def do_POST(self):
             self._dispatch("POST")
+
+        def do_PUT(self):
+            self._dispatch("PUT")
 
         def _dispatch(self, method):
             path, _, self.query = self.path.partition("?")
@@ -901,12 +1119,12 @@ def serve(hub, auth, bind, port):
         def _json(self, code, obj, headers=None):
             self._send(code, "application/json", json.dumps(obj, separators=(",", ":")).encode(), headers)
 
-        def _body(self):
+        def _body(self, limit=4096):
             try:
                 n = int(self.headers.get("Content-Length", 0))
             except ValueError:
                 n = 0
-            if not 0 < n <= 4096:
+            if not 0 < n <= limit:
                 return None
             try:
                 obj = json.loads(self.rfile.read(n))
@@ -949,6 +1167,35 @@ def serve(hub, auth, bind, port):
             c = self.claims
             self._json(200, {"user": c["sub"], "role": c["role"], "permissions": sorted(ROLES[c["role"]]),
                              "expiresIn": int(c["exp"] - time.time())})
+
+        def _schedule_reply(self, code=200):
+            with hub.lock:
+                status = hub.control
+            self._json(code, {**schedule.get(), "maxPeriods": MAX_PERIODS, "dayOrder": DAY_KEYS,
+                              "status": status})
+
+        def _get_schedule(self):
+            self._schedule_reply()
+
+        def _put_schedule(self):
+            body = self._body(limit=32768)
+            if body is None:
+                self._json(400, {"error": "expected a JSON schedule"})
+                return
+            checked, err = validate_schedule(body)
+            if err:
+                self._json(400, {"error": err})
+                return
+            try:
+                schedule.set(checked, self.claims["sub"])
+            except OSError as e:
+                self._json(500, {"error": f"cannot save schedule: {e}"})
+                return
+            print(f"{datetime.datetime.now():%H:%M:%S} schedule saved by {self.claims['sub']} "
+                  f"(enabled: {checked['enabled']})", file=sys.stderr)
+            controller.wake.set()  # apply it now
+            time.sleep(0.2)  # usually lets the status below reflect the new schedule
+            self._schedule_reply()
 
         def _state(self):
             with hub.lock:
@@ -1017,6 +1264,11 @@ def main():
     ap.add_argument("--token-hours", type=float, default=12, help="token lifetime (default: 12)")
     ap.add_argument("--session-days", type=float, default=30,
                     help="longest a login can be kept alive by refreshing (default: 30)")
+    ap.add_argument("--schedule", help="heating schedule file (default: schedule.json next to the CSV)")
+    ap.add_argument("--flow-temp", type=float, default=75,
+                    help="heating flow temperature sent with each SetMode, °C (default: 75)")
+    ap.add_argument("--hwc-temp", type=float, default=52.5,
+                    help="hot water temperature sent with each SetMode, °C (default: 52.5)")
     args = ap.parse_args()
     changes = args.changes or os.path.splitext(args.csv)[0] + ".changes.log"
     host, _, port = args.ebusd.rpartition(":")
@@ -1050,8 +1302,11 @@ def main():
         n = backfill(missing, args.csv, writer)
         print(f"read {n} samples in {time.monotonic() - t0:.0f} s; "
               + ", ".join(f"{len(a.rows)} {a.name} summaries" for a in missing), file=sys.stderr)
+    schedule = Schedule(args.schedule or os.path.join(os.path.dirname(os.path.abspath(args.csv)), "schedule.json"))
+    controller = HeatingController(schedule, hub, host, int(port), args.flow_temp, args.hwc_temp)
     writer.start()
-    serve(hub, auth, args.bind, args.port)
+    controller.start()
+    serve(hub, auth, controller, args.bind, args.port)
     print(f"web UI on port {args.port}; logging to {args.csv} and {changes} "
           f"every {args.flush_seconds:g} s", file=sys.stderr)
 
