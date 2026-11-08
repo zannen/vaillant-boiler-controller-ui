@@ -1475,7 +1475,7 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
       </div>
     </form>
     <div class="note">Heating runs only while the boiler's own timer is also on; the schedule can switch it off,
-      not on. An off time of 00:00 means midnight at the end of the day.</div>
+      not on. Times are 24-hour HH:MM: 00:00 is the start of the day and 24:00 the end.</div>
   </section>
 
   <section class="card">
@@ -2100,10 +2100,20 @@ function showControl(c) {
 function periodRow(on = "", off = "") {
   const p = el("span", "period");
   const a = el("input"), b = el("input"), x = el("button", "btn small", "✕");
-  a.type = b.type = "time";
-  a.required = b.required = true;
-  a.value = on;
-  b.value = off === "24:00" ? "00:00" : off;
+  // text, not type=time: time inputs can't hold 24:00, the end of the day
+  for (const [input, value, pattern] of [[a, on, "([01]\\d|2[0-3]):[0-5]\\d"],
+                                         [b, off, "([01]\\d|2[0-3]):[0-5]\\d|24:00"]]) {
+    input.type = "text";
+    input.required = true;
+    input.value = value;
+    input.pattern = pattern;
+    input.placeholder = "HH:MM";
+    input.maxLength = 5;
+    input.size = 5;
+    input.inputMode = "numeric";
+  }
+  a.title = "on time, 00:00–23:59";
+  b.title = "off time, 00:01–24:00 (24:00 = end of the day)";
   a.setAttribute("aria-label", "on");
   b.setAttribute("aria-label", "off");
   x.type = "button";
@@ -2120,7 +2130,7 @@ function updateAdd(box) {
 function readDay(box) {
   return [...box.querySelectorAll(".period")].map(p => {
     const [a, b] = p.querySelectorAll("input");
-    return [a.value, b.value === "00:00" ? "24:00" : b.value];
+    return [a.value.trim(), b.value.trim()];
   });
 }
 
