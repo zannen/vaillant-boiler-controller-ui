@@ -6,6 +6,37 @@ SVC_USER=boiler-ui
 CONF=/etc/$NAME
 STATE=/var/lib/$NAME
 
+# No users yet: create "admin" with a random password, give it the admin role, and show the
+# password once. 8 random bytes = 16 hex characters.
+make_admin() {
+    password=$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')
+    if command -v htpasswd >/dev/null; then
+        printf '%s' "$password" | htpasswd -i -B -C 6 "$CONF/users.htpasswd" admin 2>/dev/null
+    else  # apache2-utils is only recommended; python3-bcrypt is always installed
+        printf '%s' "$password" | python3 -c 'import bcrypt, sys
+print("admin:" + bcrypt.hashpw(sys.stdin.buffer.read(), bcrypt.gensalt(6)).decode())' \
+            >>"$CONF/users.htpasswd"
+    fi
+    chown root:"$SVC_USER" "$CONF/users.htpasswd"
+    chmod 0640 "$CONF/users.htpasswd"
+
+    if ! grep -Eq '^[[:space:]]*admin:(.*[[:space:]])?admin([[:space:]]|$)' "$CONF/roles"; then
+        if grep -Eq '^[[:space:]]*admin:' "$CONF/roles"; then
+            sed -i -E '0,/^[[:space:]]*admin:/s/^([[:space:]]*admin:.*)$/\1 admin/' "$CONF/roles"
+        else
+            echo "admin: admin" >>"$CONF/roles"
+        fi
+    fi
+
+    echo "======================================================================"
+    echo "$NAME: created the first login"
+    echo "  username: admin"
+    echo "  password: $password"
+    echo "This is shown only once. Change it with:"
+    echo "  sudo htpasswd -B -C 6 $CONF/users.htpasswd admin"
+    echo "======================================================================"
+}
+
 if [ "$1" = configure ]; then
     if ! getent passwd "$SVC_USER" >/dev/null; then
         adduser --system --group --home "$STATE" --no-create-home --quiet "$SVC_USER"
@@ -18,6 +49,9 @@ if [ "$1" = configure ]; then
     fi
     if [ ! -e "$CONF/roles" ]; then
         install -m 0640 -o root -g "$SVC_USER" "/usr/share/$NAME/roles.example" "$CONF/roles"
+    fi
+    if [ ! -s "$CONF/users.htpasswd" ]; then
+        make_admin
     fi
 fi
 
