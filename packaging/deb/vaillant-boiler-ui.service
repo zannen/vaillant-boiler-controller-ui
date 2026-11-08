@@ -9,7 +9,7 @@ ConditionFileNotEmpty=/etc/vaillant-boiler-ui/users.htpasswd
 User=boiler-ui
 Group=boiler-ui
 EnvironmentFile=-/etc/default/vaillant-boiler-ui
-ExecStart=/usr/bin/vaillant-boiler-ui /var/lib/vaillant-boiler-ui/boiler.csv \
+ExecStart=/usr/bin/vaillant-boiler-ui.py /var/lib/vaillant-boiler-ui/boiler.csv \
     --users /etc/vaillant-boiler-ui/users.htpasswd \
     --roles /etc/vaillant-boiler-ui/roles \
     --secret-file /var/lib/vaillant-boiler-ui/secret \

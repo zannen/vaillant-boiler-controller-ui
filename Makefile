@@ -1,18 +1,13 @@
 # Makefile
 
-default: nothing
-
-nothing:
+default:
 	@echo "Choose a target."
 
 vaillant-*.txt: vaillant-*.pdf
 	@pdftotext $^ - | grep -v 'Downloaded from www' >$@
 
-install:
-	@source .env && scp app/boiler-log-ui.py $(SERVER_USER)@$(SERVER_ADDR):$(SERVER_PATH)
-
 PKG := vaillant-boiler-ui
-VERSION ?= 0.1.0
+VERSION ?= 0.1.1
 MAINTAINER ?= $(shell git config user.name) <$(shell git config user.email)>
 DEB := build/$(PKG)_$(VERSION)_all.deb
 DEBROOT := build/deb
@@ -27,8 +22,8 @@ deb:
 		packaging/deb/control >$(DEBROOT)/DEBIAN/control
 	install -m 0644 packaging/deb/conffiles $(DEBROOT)/DEBIAN/
 	install -m 0755 packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm $(DEBROOT)/DEBIAN/
-	install -m 0755 app/boiler-log-ui.py $(DEBROOT)/usr/lib/$(PKG)/
-	ln -s ../lib/$(PKG)/boiler-log-ui.py $(DEBROOT)/usr/bin/$(PKG)
+	install -m 0755 app/$(PKG).py $(DEBROOT)/usr/lib/$(PKG)/
+	ln -s ../lib/$(PKG)/$(PKG).py $(DEBROOT)/usr/bin/
 	install -m 0644 packaging/deb/$(PKG).service $(DEBROOT)/usr/lib/systemd/system/
 	install -m 0644 packaging/deb/default $(DEBROOT)/etc/default/$(PKG)
 	install -m 0644 packaging/deb/roles.example $(DEBROOT)/usr/share/$(PKG)/
