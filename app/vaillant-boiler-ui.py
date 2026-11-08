@@ -2096,7 +2096,9 @@ function showInstruction() {
   const state = document.getElementById("cmd-state"), when = document.getElementById("cmd-when"),
         fail = document.getElementById("cmd-fail"), ok = control && control.lastOk, last = control && control.lastSend;
   state.className = "cmd-state" + (ok ? " " + ok.state : "");
-  state.textContent = ok ? `heating ${ok.state.toUpperCase()}` : "none sent yet";
+  state.textContent = ok ? `heating ${ok.state.toUpperCase()}`
+    : !control ? "unknown (no status from the app yet)"
+    : !control.enabled ? "none: the heating schedule is disabled" : "none sent yet";
   when.textContent = ok ? `at ${ok.time.slice(11, 19)} (${ago(ok.time)})` : "";
   fail.textContent = last && !last.ok ? `· ${last.state} failed at ${last.time.slice(11, 19)}: ${last.result}` : "";
 }
