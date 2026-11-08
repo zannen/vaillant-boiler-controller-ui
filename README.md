@@ -27,7 +27,38 @@ sudo systemctl start ebusd
 sudo systemctl enable ebusd
 ```
 
-### app
+### app, from a DEB package
+
+Build the package (needs `dpkg-deb`; `make lint-deb` also needs `shellcheck`):
+
+```sh
+make deb                  # or: make deb VERSION=0.2.0
+scp build/vaillant-boiler-ui_*_all.deb "$SERVER_USER@$SERVER_ADDR:"
+```
+
+On the Pi:
+
+```sh
+sudo apt install ./vaillant-boiler-ui_*_all.deb
+# -c only if the file is empty or missing
+sudo htpasswd -B -C 6 /etc/vaillant-boiler-ui/users.htpasswd YOUR_ADMIN_USER
+sudo nano /etc/vaillant-boiler-ui/roles     # add YOUR_ADMIN_USER to the admin: line
+sudo systemctl start vaillant-boiler-ui
+```
+
+The package installs:
+
+| Path | Contents |
+| ---- | -------- |
+| `/usr/bin/vaillant-boiler-ui` | the program |
+| `/usr/lib/systemd/system/vaillant-boiler-ui.service` | service, enabled on install; it waits until `users.htpasswd` has a user |
+| `/etc/vaillant-boiler-ui/users.htpasswd`, `roles` | logins (root-owned, readable by the service only) |
+| `/etc/default/vaillant-boiler-ui` | extra options in `BOILER_UI_OPTS` |
+| `/var/lib/vaillant-boiler-ui/` | CSV logs, summaries, change log and token signing key |
+
+It runs as the `boiler-ui` system user. `sudo apt purge vaillant-boiler-ui` deletes the logins and all logged data.
+
+### app, copied by hand
 
 Copy `.env.txt` to `.env` and set your Raspberry Pi server username (`SERVER_USER`), address (`SERVER_ADDR`) and install path (`SERVER_PATH`).
 
