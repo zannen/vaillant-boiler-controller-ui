@@ -1,0 +1,14 @@
+Package: vaillant-boiler-ui
+Version: @VERSION@
+Architecture: all
+Maintainer: @MAINTAINER@
+Section: misc
+Priority: optional
+Depends: python3 (>= 3.7), python3-bcrypt, adduser
+Recommends: apache2-utils
+Suggests: ebusd
+Homepage: https://github.com/zannen/vaillant-boiler-controller-ui
+Description: logger and web UI for Vaillant boilers via ebusd
+ Polls a Vaillant boiler through ebusd, logs readings to CSV and serves a
+ live web UI with gauges, charts and a change log. Logins are checked against
+ an htpasswd file, with admin, user and viewer roles.

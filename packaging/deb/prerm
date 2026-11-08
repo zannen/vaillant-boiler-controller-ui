@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+NAME=vaillant-boiler-ui
+
+# on upgrade, postinst restarts it instead
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl stop "$NAME.service" || true
+fi
+
+exit 0

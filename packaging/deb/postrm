@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+NAME=vaillant-boiler-ui
+
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    if command -v systemctl >/dev/null; then
+        systemctl disable "$NAME.service" >/dev/null 2>&1 || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+fi
+
+# purge deletes the logins and all logged boiler data; the boiler-ui system user is kept
+if [ "$1" = purge ]; then
+    rm -rf "/etc/${NAME:?}" "/var/lib/${NAME:?}"
+fi
+
+exit 0

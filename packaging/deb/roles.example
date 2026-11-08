@@ -1,0 +1,7 @@
+# Roles for vaillant-boiler-ui, one line per role: "role: user user ...".
+# admin: everything; user: read and control the boiler; viewer: read only.
+# Users must also have a password in /etc/vaillant-boiler-ui/users.htpasswd.
+# Changes take effect without a restart.
+admin:
+user:
+viewer:

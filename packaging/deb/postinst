@@ -1,0 +1,46 @@
+#!/bin/sh
+set -e
+
+NAME=vaillant-boiler-ui
+SVC_USER=boiler-ui
+CONF=/etc/$NAME
+STATE=/var/lib/$NAME
+
+if [ "$1" = configure ]; then
+    if ! getent passwd "$SVC_USER" >/dev/null; then
+        adduser --system --group --home "$STATE" --no-create-home --quiet "$SVC_USER"
+    fi
+    install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$STATE"
+    # passwords and roles: editable by root, readable by the service only
+    install -d -m 0750 -o root -g "$SVC_USER" "$CONF"
+    if [ ! -e "$CONF/users.htpasswd" ]; then
+        install -m 0640 -o root -g "$SVC_USER" /dev/null "$CONF/users.htpasswd"
+    fi
+    if [ ! -e "$CONF/roles" ]; then
+        install -m 0640 -o root -g "$SVC_USER" "/usr/share/$NAME/roles.example" "$CONF/roles"
+    fi
+fi
+
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-remove ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+    if [ -z "$2" ] && command -v systemctl >/dev/null; then
+        systemctl enable "$NAME.service" >/dev/null 2>&1 || true  # first install only
+    fi
+    if [ -d /run/systemd/system ]; then
+        if [ -n "$2" ]; then
+            systemctl try-restart "$NAME.service" || true
+        fi
+        # does nothing until users.htpasswd has a user (ConditionFileNotEmpty)
+        systemctl start "$NAME.service" || true
+    fi
+    if [ ! -s "$CONF/users.htpasswd" ]; then
+        echo "$NAME: add a user before it will start, e.g.:"
+        echo "  sudo htpasswd -B -C 6 $CONF/users.htpasswd YOUR_NAME"
+        echo "  then add YOUR_NAME to the admin line of $CONF/roles"
+        echo "  and run: sudo systemctl start $NAME"
+    fi
+fi
+
+exit 0
