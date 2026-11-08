@@ -616,6 +616,7 @@ class HeatingController(threading.Thread):
         self.sent_at = 0.0      # monotonic time of that send
         self.attempt_at = 0.0   # monotonic time of the last attempt (success or not)
         self.last = None        # {"time", "state", "ok", "result"} of the last attempt
+        self.last_ok = None     # the same, for the last attempt the boiler accepted
 
     def setmode(self, off):
         return f"auto;{self.flow_temp:g};{self.hwc_temp:g};-;{int(off)};0;0;0;0;0"
@@ -632,6 +633,8 @@ class HeatingController(threading.Thread):
         except (OSError, ConnectionError) as e:
             result, ok = f"ERR: {e}", False
         self.last = {"time": stamp(), "state": state, "ok": ok, "result": result}
+        if ok:
+            self.last_ok = self.last
         if ok:
             if state != self.sent:
                 self.hub.record("HeatingSchedule", state, stamp())
@@ -658,6 +661,7 @@ class HeatingController(threading.Thread):
             "target": target,
             "nextChange": nxt.isoformat(timespec="minutes") if nxt else None,
             "lastSend": self.last,
+            "lastOk": self.last_ok,
             "resendSeconds": self.RESEND_SECONDS,
         })
 
@@ -1400,6 +1404,9 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 .btn.small { padding: 0 7px; font-size: 12px; }
 .err { color: var(--bad); }
 #sched-status.bad { color: var(--bad); }
+.cmd-state { padding: 0 6px; border-radius: 4px; }
+.cmd-state.on { background: var(--on); color: #111; }
+.cmd-state.off { background: var(--track); color: var(--text); }
 .srow { display: grid; grid-template-columns: 44px 1fr minmax(120px, 34%); gap: 10px; align-items: center; padding: 3px 0; }
 .srow .day { color: var(--text2); }
 .srow .day.today { color: var(--text); font-weight: 600; }
@@ -1443,6 +1450,7 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
     <span class="lamp" id="l-HwcDemand"><i></i>HW demand (d.22)</span>
     <span class="kv">Valve position (d.35) <b data-v="PositionValveSet">—</b></span>
     <span class="kv">Error <b data-v="Currenterror">—</b></span>
+    <span class="kv" id="cmd" title="last SetMode instruction the boiler accepted">Last instruction <b class="cmd-state" id="cmd-state">—</b> <b id="cmd-when"></b> <span class="err" id="cmd-fail"></span></span>
   </section>
 
   <section class="card" id="gauges"></section>
@@ -2077,6 +2085,22 @@ function renderSchedule() {
   view.style.opacity = sched.enabled ? "" : "0.45";
 }
 
+// "Last instruction" in the status bar: what the boiler last accepted, how long ago, and any later failure
+function ago(iso) {
+  const secs = Math.max(0, (Date.now() + skew - new Date(iso).getTime()) / 1000);
+  return secs < 60 ? `${Math.round(secs)} s ago` : secs < 3600 ? `${Math.floor(secs / 60)} min ago`
+    : `${Math.floor(secs / 3600)} h ${Math.floor(secs % 3600 / 60)} min ago`;
+}
+
+function showInstruction() {
+  const state = document.getElementById("cmd-state"), when = document.getElementById("cmd-when"),
+        fail = document.getElementById("cmd-fail"), ok = control && control.lastOk, last = control && control.lastSend;
+  state.className = "cmd-state" + (ok ? " " + ok.state : "");
+  state.textContent = ok ? `heating ${ok.state.toUpperCase()}` : "none sent yet";
+  when.textContent = ok ? `at ${ok.time.slice(11, 19)} (${ago(ok.time)})` : "";
+  fail.textContent = last && !last.ok ? `· ${last.state} failed at ${last.time.slice(11, 19)}: ${last.result}` : "";
+}
+
 function showControl(c) {
   control = c;
   const out = document.getElementById("sched-status");
@@ -2095,6 +2119,7 @@ function showControl(c) {
   if (s) parts.push(`last sent ${s.time.slice(11, 19)}: heating ${s.state} ${s.ok ? "✓" : "failed (" + s.result + ")"}`);
   out.textContent = parts.join(" · ");
   out.classList.toggle("bad", !!(s && !s.ok));
+  showInstruction();
 }
 
 function periodRow(on = "", off = "") {
@@ -2355,6 +2380,7 @@ function showAge() {
 setInterval(() => {
   checkConnection(false);
   showAge();
+  showInstruction();
   scheduleDraw();  // keep the charts scrolling between updates
 }, 1000);
 addEventListener("resize", scheduleDraw);
