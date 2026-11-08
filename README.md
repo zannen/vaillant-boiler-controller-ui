@@ -11,9 +11,7 @@ It has been tested on:
 | ecoTEC plus 837       | ✅ |
 | all others            | ❌ |
 
-## Installation
-
-### ebusd
+## ebusd Installation
 
 Get it from https://github.com/john30/ebusd.
 
@@ -27,7 +25,7 @@ sudo systemctl start ebusd
 sudo systemctl enable ebusd
 ```
 
-### app, from a DEB package
+## app installation from DEB package
 
 Build the package (needs `dpkg-deb`; `make lint-deb` also needs `shellcheck`):
 
@@ -63,26 +61,6 @@ The package installs:
 | `/var/lib/vaillant-boiler-ui/` | CSV logs, summaries, change log and token signing key |
 
 It runs as the `boiler-ui` system user. `sudo apt purge vaillant-boiler-ui` deletes the logins and all logged data.
-
-### app, copied by hand
-
-Copy `.env.txt` to `.env` and set your Raspberry Pi server username (`SERVER_USER`), address (`SERVER_ADDR`) and install path (`SERVER_PATH`).
-
-```sh
-source .env
-make install
-
-ssh "$SERVER_USER@$SERVER_ADDR"
-  # -c: create the file, use it first time only
-  htpasswd -c -B -C 6 boiler-users.htpasswd YOUR_ADMIN_USER
-  echo 'admin: YOUR_ADMIN_USER' >boiler-roles
-  chmod 600 boiler-users.htpasswd boiler-roles
-  # install systemd file, then:
-  sudo systemctl daemon-reload
-  sudo systemctl start boiler-ui.service
-  sudo systemctl enable boiler-ui.service
-  exit # log out of ssh
-```
 
 Now check out the server at `http://$SERVER_ADDR:8000/`.
 

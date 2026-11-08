@@ -7,7 +7,7 @@ vaillant-*.txt: vaillant-*.pdf
 	@pdftotext $^ - | grep -v 'Downloaded from www' >$@
 
 PKG := vaillant-boiler-ui
-VERSION ?= 0.1.1
+VERSION ?= 0.1.2
 MAINTAINER ?= $(shell git config user.name) <$(shell git config user.email)>
 DEB := build/$(PKG)_$(VERSION)_all.deb
 DEBROOT := build/deb
