@@ -1,0 +1,36 @@
+[Unit]
+Description=Vaillant boiler logger and web UI
+After=ebusd.service network-online.target time-sync.target
+Wants=ebusd.service time-sync.target
+# nobody could log in without users, so don't start until there are some
+ConditionFileNotEmpty=/etc/vaillant-boiler-ui/users.htpasswd
+
+[Service]
+User=boiler-ui
+Group=boiler-ui
+EnvironmentFile=-/etc/default/vaillant-boiler-ui
+ExecStart=/usr/bin/vaillant-boiler-ui.py /var/lib/vaillant-boiler-ui/boiler.csv \
+    --users /etc/vaillant-boiler-ui/users.htpasswd \
+    --roles /etc/vaillant-boiler-ui/roles \
+    --secret-file /var/lib/vaillant-boiler-ui/secret \
+    $BOILER_UI_OPTS
+StateDirectory=vaillant-boiler-ui
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/vaillant-boiler-ui
+Restart=always
+RestartSec=10
+# give a slow SD card time to take the last batch of log writes
+TimeoutStopSec=60
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

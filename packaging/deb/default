@@ -1,0 +1,5 @@
+# Extra options for vaillant-boiler-ui (see: vaillant-boiler-ui --help).
+# Restart the service after editing: sudo systemctl restart vaillant-boiler-ui
+# Example:
+#   BOILER_UI_OPTS="--port 8000 --ebusd 127.0.0.1:8888 --token-hours 12"
+BOILER_UI_OPTS=""
