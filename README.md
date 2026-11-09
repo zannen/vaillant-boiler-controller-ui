@@ -58,7 +58,7 @@ The package installs:
 | `/usr/lib/systemd/system/vaillant-boiler-ui.service` | service, enabled on install; it waits until `users.htpasswd` has a user |
 | `/etc/vaillant-boiler-ui/users.htpasswd`, `roles` | logins (root-owned, readable by the service only) |
 | `/etc/default/vaillant-boiler-ui` | extra options in `BOILER_UI_OPTS` |
-| `/var/lib/vaillant-boiler-ui/` | CSV logs, summaries, change log, heating schedule and token signing key |
+| `/var/lib/vaillant-boiler-ui/` | CSV logs, summaries, change log, boiler instructions (`boiler.commands.csv`), heating schedule and token signing key |
 
 It runs as the `boiler-ui` system user. `sudo apt purge vaillant-boiler-ui` deletes the logins and all logged data.
 
