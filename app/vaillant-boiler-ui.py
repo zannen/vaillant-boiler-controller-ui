@@ -734,6 +734,8 @@ class HeatingController(threading.Thread):
             "target": target,
             "nextChange": nxt.isoformat(timespec="minutes") if nxt else None,
             "nextSend": nxt_send.isoformat(timespec="seconds") if nxt_send else None,
+            "nextState": None if nxt_send is None else (
+                target if nxt_send == self.retry_at else ("on" if self.schedule.wanted(nxt_send) else "off")),
             "lastSend": self.last,
             "lastOk": self.last_ok,
             "resendSeconds": self.RESEND_SECONDS,
@@ -1495,7 +1497,6 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 .btn.primary { background: var(--s1); border-color: var(--s1); color: #fff; }
 .btn.small { padding: 0 7px; font-size: 12px; }
 .err { color: var(--bad); }
-#sched-status.bad { color: var(--bad); }
 .cmd-state { padding: 0 6px; border-radius: 4px; }
 .cmd-state.on { background: var(--on); color: #111; }
 .cmd-state.off { background: var(--track); color: var(--text); }
@@ -1544,6 +1545,7 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
     <span class="kv">Valve position (d.35) <b data-v="PositionValveSet">—</b></span>
     <span class="kv">Error <b data-v="Currenterror">—</b></span>
     <span class="kv" id="cmd" title="last SetMode instruction the boiler accepted">Last instruction <b class="cmd-state" id="cmd-state">—</b> <b id="cmd-when"></b> <span class="err" id="cmd-fail"></span></span>
+    <span class="kv" id="cmd-next-item" title="next SetMode instruction the app will send">Next instruction <b class="cmd-state" id="cmd-next">—</b> <b id="cmd-next-when"></b></span>
   </section>
 
   <section class="card" id="gauges"></section>
@@ -1561,7 +1563,7 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
   <section class="card" id="sched">
     <div class="bar">
       <h2>Heating schedule</h2>
-      <span class="kv" id="sched-status">—</span>
+      <label class="kv" title="change it with Edit"><input type="checkbox" id="sched-on" disabled> enabled</label>
       <button id="sched-edit" class="btn" type="button" hidden>Edit</button>
     </div>
     <div id="sched-view"></div>
@@ -1617,7 +1619,6 @@ const stateText = s => s == null ? "—" : `S.${s}  ${STATES[Number(s)] || ""}`;
 // (zero at 12 o'clock, negative values to the left).
 const GAUGES = [
   ["FlowTemp", "Flow (d.40)", "°C", 0, 90, 1],
-  ["rise", "Flow rise", "°C/s", -10, 10, 1],
   ["ReturnTemp", "Return (d.41)", "°C", 0, 90, 1],
   ["HwcTemp", "Hot water", "°C", 0, 70, 1],
   ["StorageTemp", "Storage", "°C", 0, 70, 1],
@@ -2232,6 +2233,7 @@ function loadSchedule() {
 function renderSchedule() {
   const view = document.getElementById("sched-view");
   document.getElementById("sched-edit").hidden = editing || !sched || (getAuth() || {}).role !== "admin";
+  showEnabled();
   showControl(control);
   if (!sched) return;
   const now = new Date(), today = JS_DAY[now.getDay()], nowMin = now.getHours() * 60 + now.getMinutes();
@@ -2284,27 +2286,31 @@ function showInstruction() {
     : !control.enabled ? "none: the heating schedule is disabled" : "none sent yet";
   when.textContent = ok ? `at ${ok.time.slice(11, 19)} (${ago(ok.time)})` : "";
   fail.textContent = last && !last.ok ? `· ${last.state} failed at ${last.time.slice(11, 19)}: ${last.result}` : "";
+
+  const next = document.getElementById("cmd-next"), nextWhen = document.getElementById("cmd-next-when");
+  const due = control && control.enabled && control.nextSend;
+  next.className = "cmd-state" + (due ? " " + control.nextState : "");
+  next.textContent = due ? `heating ${control.nextState.toUpperCase()}`
+    : !control ? "unknown" : !control.enabled ? "none: the heating schedule is disabled" : "—";
+  nextWhen.textContent = due ? `at ${control.nextSend.slice(11, 19)} (${until(control.nextSend)})` : "";
+}
+
+function until(iso) {
+  const secs = Math.max(0, (new Date(iso).getTime() - Date.now() - skew) / 1000);
+  return secs < 60 ? `in ${Math.round(secs)} s` : `in ${Math.floor(secs / 60)} min ${Math.round(secs % 60)} s`;
 }
 
 function showControl(c) {
   control = c;
-  const out = document.getElementById("sched-status");
-  if (!c) { out.textContent = "—"; return; }
-  const fmt = iso => {
-    const d = new Date(iso);
-    return `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${clock(d.getTime())}`;
-  };
-  const parts = [];
-  if (!c.enabled) parts.push("disabled: the boiler follows its own controls");
-  else {
-    parts.push(`heating ${c.target === "on" ? "allowed" : "blocked"} now`);
-    parts.push(c.nextChange ? `until ${fmt(c.nextChange)}` : "all week");
-  }
-  const s = c.lastSend;
-  if (s) parts.push(`last sent ${s.time.slice(11, 19)}: heating ${s.state} ${s.ok ? "✓" : "failed (" + s.result + ")"}`);
-  out.textContent = parts.join(" · ");
-  out.classList.toggle("bad", !!(s && !s.ok));
+  showEnabled();
   showInstruction();
+}
+
+function showEnabled() {
+  const enabled = control ? control.enabled : sched ? sched.enabled : null;
+  const box = document.getElementById("sched-on");
+  box.checked = !!enabled;
+  box.indeterminate = enabled == null;
 }
 
 function periodRow(on = "", off = "") {
