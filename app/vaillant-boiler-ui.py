@@ -1524,8 +1524,7 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 
 .bar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .bar select { background: var(--bg); color: var(--text); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font: inherit; }
-#charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 14px 20px; }
-.chart.wide { grid-column: 1 / -1; }
+#charts { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .chead { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; color: var(--text2); font-size: 13px; }
 .ctitle { color: var(--text); font-weight: 600; }
 .legend { display: inline-flex; align-items: center; gap: 5px; }
@@ -1755,11 +1754,11 @@ function applyValues(values, rise) {
 // ---------------------------------------------------------------- charts
 // One chart per measure (no shared y-scales); every chart shares the time axis and crosshair.
 const CHARTS = [
-  { title: "Temperatures", unit: "°C", dp: 1, minSpan: 4, wide: true,
+  { title: "Temperatures", unit: "°C", dp: 1, minSpan: 4,
     series: [["FlowTemp", "Flow (d.40)", "var(--s1)"], ["ReturnTemp", "Return (d.41)", "var(--s2)"], ["HwcTemp", "Hot water", "var(--s3)"]] },
-  { title: "Boiler instructions (SetMode)", wide: true, commands: true,
+  { title: "Boiler instructions (SetMode)", commands: true,
     legend: [["heating allowed (on)", "var(--on)"], ["heating blocked (off)", "var(--s1)"], ["send failed", "var(--bad)"], ["override", "var(--on)", "dot"]] },
-  { title: "Burner & demand (gas valve d.30, HW demand d.22)", wide: true,
+  { title: "Burner & demand (gas valve d.30, HW demand d.22)",
     strips: [["Flame", "Flame"], ["Gasvalve", "Gas valve"], ["HwcDemand", "HW demand"]] },
   { title: "Flow rise", unit: "°C/s", dp: 1, minSpan: 2, zero: true, series: [["rise", "Flow rise", "var(--s1)"]] },
   { title: "Fan", d: 34, unit: "rpm", dp: 0, minSpan: 500, series: [["FanSpeed", "Fan", "var(--s1)"]] },
@@ -1846,7 +1845,7 @@ function windowLabel(m) {
 const chartsEl = document.getElementById("charts");
 const charts = CHARTS.map((c, n) => {
   const card = document.createElement("div");
-  card.className = "chart" + (c.wide ? " wide" : "");
+  card.className = "chart";
   const head = document.createElement("div");
   head.className = "chead";
   const title = document.createElement("span");
