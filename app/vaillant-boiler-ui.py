@@ -1530,6 +1530,7 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 .ctitle { color: var(--text); font-weight: 600; }
 .legend { display: inline-flex; align-items: center; gap: 5px; }
 .legend i { width: 12px; height: 2px; border-radius: 1px; }
+.legend i.dot { width: 9px; height: 9px; border-radius: 50%; }
 .chart svg { width: 100%; display: block; cursor: crosshair; }
 .chart .gridl { stroke: var(--grid); stroke-width: 1; }
 .chart .base { stroke: var(--axis); stroke-width: 1; }
@@ -1757,7 +1758,7 @@ const CHARTS = [
   { title: "Temperatures", unit: "°C", dp: 1, minSpan: 4, wide: true,
     series: [["FlowTemp", "Flow (d.40)", "var(--s1)"], ["ReturnTemp", "Return (d.41)", "var(--s2)"], ["HwcTemp", "Hot water", "var(--s3)"]] },
   { title: "Boiler instructions (SetMode)", wide: true, commands: true,
-    legend: [["heating allowed (on)", "var(--on)"], ["heating blocked (off)", "var(--s1)"], ["send failed", "var(--bad)"], ["override (tall tick)", "var(--on)"]] },
+    legend: [["heating allowed (on)", "var(--on)"], ["heating blocked (off)", "var(--s1)"], ["send failed", "var(--bad)"], ["override", "var(--on)", "dot"]] },
   { title: "Burner & demand (gas valve d.30, HW demand d.22)", wide: true,
     strips: [["Flame", "Flame"], ["Gasvalve", "Gas valve"], ["HwcDemand", "HW demand"]] },
   { title: "Flow rise", unit: "°C/s", dp: 1, minSpan: 2, zero: true, series: [["rise", "Flow rise", "var(--s1)"]] },
@@ -1854,10 +1855,11 @@ const charts = CHARTS.map((c, n) => {
   head.append(title);
   const legend = c.legend || (c.series && c.series.length > 1 ? c.series.map(([, label, col]) => [label, col]) : []);
   {
-    for (const [label, col] of legend) {
+    for (const [label, col, shape] of legend) {
       const item = document.createElement("span");
       item.className = "legend";
       const sw = document.createElement("i");
+      if (shape) sw.className = shape;
       sw.style.background = col;
       item.append(sw, document.createTextNode(label));
       head.append(item);
@@ -2130,9 +2132,13 @@ function drawCommands(ch, t0, t1) {
   if (t1 - t0 <= 2 * 86400e3) {
     for (const [ms, st, ok, source] of commands) {
       if (ms < t0) continue;
-      const tall = !ok || (source || "").startsWith("override:");  // failures and overrides stand out
+      if (ok && (source || "").startsWith("override:")) {  // overrides: a filled circle, ringed so it stands clear
+        out += `<circle clip-path="url(#clip${ch.id})" fill="var(--on)" stroke="var(--card)" stroke-width="1.5" ` +
+               `cx="${x(ms).toFixed(1)}" cy="${top + 9}" r="5.5"/>`;
+        continue;
+      }
       out += `<rect clip-path="url(#clip${ch.id})" fill="${ok ? colour(st) : "var(--bad)"}" ` +
-             `x="${(x(ms) - (tall ? 1.5 : 1)).toFixed(1)}" y="${top + (tall ? 0 : 3)}" width="${tall ? 3 : 2}" height="${tall ? 18 : 12}"/>`;
+             `x="${(x(ms) - 1).toFixed(1)}" y="${top + (ok ? 3 : 0)}" width="2" height="${ok ? 12 : 18}"/>`;
     }
   } else {
     out += `<text class="ylab" x="${ML + 6}" y="${top + 13}">individual sends shown for windows up to 2 days</text>`;
