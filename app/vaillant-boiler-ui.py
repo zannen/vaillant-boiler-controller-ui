@@ -593,6 +593,57 @@ class Schedule:
         return None
 
 
+class CommandLog:
+    """Every SetMode instruction sent to the boiler: appended to <csv name>.commands.csv and the
+    last KEEP_DAYS kept in memory for the chart, as [epoch ms, "on"|"off", 1 if accepted else 0]."""
+
+    HEADER = ["time", "ms", "state", "ok", "result"]
+    KEEP_DAYS = 31
+
+    def __init__(self, path, hub, writer):
+        self.path, self.hub, self.writer = path, hub, writer
+        self.lock = threading.Lock()
+        self.rows = collections.deque(maxlen=60000)
+
+    def load(self):
+        if not os.path.exists(self.path):
+            return 0
+        cutoff = epoch_ms() - self.KEEP_DAYS * 86400000
+        lines, _ = tail_lines(self.path, self.rows.maxlen * 120)
+        rows = []
+        for r in csv.reader(lines):
+            if len(r) != len(self.HEADER) or r[0] == "time" or r[2] not in ("on", "off"):
+                continue
+            try:
+                ms = int(r[1])
+            except ValueError:
+                continue
+            if ms >= cutoff:
+                rows.append([ms, r[2], int(r[3] == "1")])
+        rows.sort(key=lambda r: r[0])
+        with self.lock:
+            self.rows.extend(rows)
+        return len(rows)
+
+    def add(self, state, ok, result):
+        ms = epoch_ms()
+        when = datetime.datetime.fromtimestamp(ms / 1000).isoformat(timespec="milliseconds")
+        if needs_header(self.path) and not self.rows:
+            self.writer.csv_row(self.HEADER, self.path)
+        self.writer.csv_row([when, ms, state, int(ok), result], self.path)
+        row = [ms, state, int(ok)]
+        with self.lock:
+            self.rows.append(row)
+            cutoff = ms - self.KEEP_DAYS * 86400000
+            while self.rows and self.rows[0][0] < cutoff:
+                self.rows.popleft()
+        self.hub.broadcast({"type": "command", "row": row})
+
+    def get(self):
+        with self.lock:
+            return list(self.rows)
+
+
 class HeatingController(threading.Thread):
     """Applies the schedule by telling the boiler, over eBUS, to block or allow central heating.
 
@@ -607,9 +658,11 @@ class HeatingController(threading.Thread):
     RESEND_SECONDS = 600
     RETRY_SECONDS = 60
 
-    def __init__(self, schedule, hub, host, port, flow_temp, hwc_temp):
+    HOLD_SECONDS = 900  # how long the boiler keeps a SetMode block without a repeat
+
+    def __init__(self, schedule, hub, commands, host, port, flow_temp, hwc_temp):
         super().__init__(daemon=True)
-        self.schedule, self.hub, self.host, self.port = schedule, hub, host, port
+        self.schedule, self.hub, self.commands, self.host, self.port = schedule, hub, commands, host, port
         self.flow_temp, self.hwc_temp = flow_temp, hwc_temp
         self.wake = threading.Event()
         self.sent = None        # "on"/"off" last confirmed by ebusd, or None
@@ -633,9 +686,9 @@ class HeatingController(threading.Thread):
         except (OSError, ConnectionError) as e:
             result, ok = f"ERR: {e}", False
         self.last = {"time": stamp(), "state": state, "ok": ok, "result": result}
+        self.commands.add(state, ok, result)
         if ok:
             self.last_ok = self.last
-        if ok:
             if state != self.sent:
                 self.hub.record("HeatingSchedule", state, stamp())
             self.sent, self.sent_at = state, self.attempt_at
@@ -789,6 +842,10 @@ class Hub:
         with self.lock:
             if q in self.clients:
                 self.clients.remove(q)
+
+    def broadcast(self, msg):
+        with self.lock:
+            self._broadcast(msg)
 
     def _broadcast(self, msg):  # caller holds the lock
         for q in list(self.clients):
@@ -1076,6 +1133,7 @@ def serve(hub, auth, controller, bind, port):
             ("GET", "/api/whoami"): ("_whoami", "read"),
             ("GET", "/api/state"): ("_state", "read"),
             ("GET", "/api/agg"): ("_agg", "read"),
+            ("GET", "/api/commands"): ("_commands", "read"),
             ("GET", "/api/events"): ("_events", "read"),
             ("GET", "/api/schedule"): ("_get_schedule", "read"),
             ("PUT", "/api/schedule"): ("_put_schedule", "admin"),
@@ -1206,6 +1264,9 @@ def serve(hub, auth, controller, bind, port):
                 snap = hub.snapshot()
             self._json(200, snap)
 
+        def _commands(self):
+            self._json(200, {"rows": controller.commands.get(), "holdSeconds": controller.HOLD_SECONDS})
+
         def _agg(self):
             tier = urllib.parse.parse_qs(self.query).get("tier", [""])[0]
             data = hub.agg_rows(tier)
@@ -1283,7 +1344,8 @@ def main():
     base = os.path.splitext(args.csv)[0]
     aggs = [Aggregator(name, ms, keep, f"{base}.{name}.csv") for name, ms, keep in TIERS]
     for path, header, row_ok in [(args.csv, ["time"] + list(VALUES), logger_row_ok)] + \
-            [(a.path, a.header(), summary_row_ok) for a in aggs]:
+            [(a.path, a.header(), summary_row_ok) for a in aggs] + \
+            [(f"{base}.commands.csv", CommandLog.HEADER, summary_row_ok)]:
         t0 = time.monotonic()
         result = repair_csv(path, header, row_ok)
         if result:
@@ -1307,7 +1369,9 @@ def main():
         print(f"read {n} samples in {time.monotonic() - t0:.0f} s; "
               + ", ".join(f"{len(a.rows)} {a.name} summaries" for a in missing), file=sys.stderr)
     schedule = Schedule(args.schedule or os.path.join(os.path.dirname(os.path.abspath(args.csv)), "schedule.json"))
-    controller = HeatingController(schedule, hub, host, int(port), args.flow_temp, args.hwc_temp)
+    commands = CommandLog(f"{base}.commands.csv", hub, writer)
+    print(f"loaded {commands.load()} boiler instructions from {commands.path}", file=sys.stderr)
+    controller = HeatingController(schedule, hub, commands, host, int(port), args.flow_temp, args.hwc_temp)
     writer.start()
     controller.start()
     serve(hub, auth, controller, args.bind, args.port)
@@ -1608,6 +1672,8 @@ function applyValues(values, rise) {
 const CHARTS = [
   { title: "Temperatures", unit: "°C", dp: 1, minSpan: 4, wide: true,
     series: [["FlowTemp", "Flow (d.40)", "var(--s1)"], ["ReturnTemp", "Return (d.41)", "var(--s2)"], ["HwcTemp", "Hot water", "var(--s3)"]] },
+  { title: "Boiler instructions (SetMode)", wide: true, commands: true,
+    legend: [["heating allowed (on)", "var(--on)"], ["heating blocked (off)", "var(--s1)"], ["send failed", "var(--bad)"]] },
   { title: "Burner & demand (gas valve d.30, HW demand d.22)", wide: true,
     strips: [["Flame", "Flame"], ["Gasvalve", "Gas valve"], ["HwcDemand", "HW demand"]] },
   { title: "Flow rise", unit: "°C/s", dp: 1, minSpan: 2, zero: true, series: [["rise", "Flow rise", "var(--s1)"]] },
@@ -1702,8 +1768,9 @@ const charts = CHARTS.map((c, n) => {
   title.className = "ctitle";
   title.textContent = c.title + (c.unit ? ` (${c.unit})` : "") + (c.d ? ` (d.${c.d})` : "");
   head.append(title);
-  if (c.series && c.series.length > 1) {
-    for (const [, label, col] of c.series) {
+  const legend = c.legend || (c.series && c.series.length > 1 ? c.series.map(([, label, col]) => [label, col]) : []);
+  {
+    for (const [label, col] of legend) {
       const item = document.createElement("span");
       item.className = "legend";
       const sw = document.createElement("i");
@@ -1713,7 +1780,7 @@ const charts = CHARTS.map((c, n) => {
     }
   }
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  const height = c.strips ? MT + c.strips.length * ROW_H + MB : LINE_H;
+  const height = c.strips ? MT + c.strips.length * ROW_H + MB : c.commands ? MT + 2 * ROW_H + MB : LINE_H;
   svg.setAttribute("height", height);
   card.append(head, svg);
   chartsEl.append(card);
@@ -1923,13 +1990,101 @@ function drawStrips(ch, s, t0, t1) {
   return out + crosshair(x, H);
 }
 
+// ---------------------------------------------------------------- boiler instructions chart
+// Top lane: what the boiler was told, held from each accepted instruction until the next one,
+// or until the boiler's own timeout (holdSeconds) if nothing followed. Bottom lane: every send,
+// one tick each (red if ebusd refused it or could not be reached); omitted beyond 2 days.
+let commands = [], holdMs = 900000;
+
+function loadCommands() {
+  api("/api/commands").then(r => r.ok ? r.json() : null).then(d => {
+    if (!d) return;
+    commands = d.rows;
+    holdMs = d.holdSeconds * 1000;
+    scheduleDraw();
+  }).catch(() => {});
+}
+
+function addCommand(row) {
+  if (commands.length && row[0] <= commands[commands.length - 1][0]) return;
+  commands.push(row);
+  const cutoff = row[0] - 31 * 86400e3;
+  while (commands.length && commands[0][0] < cutoff) commands.shift();
+  scheduleDraw();
+}
+
+// accepted instructions as [from, to, state] runs
+function commandRuns(t1) {
+  const ok = commands.filter(c => c[2] === 1), runs = [];
+  ok.forEach((c, i) => {
+    const end = Math.min(i + 1 < ok.length ? ok[i + 1][0] : Infinity, c[0] + holdMs, t1);
+    const last = runs[runs.length - 1];
+    if (last && last[2] === c[1] && last[1] >= c[0]) last[1] = end;
+    else runs.push([c[0], end, c[1]]);
+  });
+  return runs;
+}
+
+function drawCommands(ch, t0, t1) {
+  const { W, H, x, clip } = frame(ch, t0, t1);
+  const colour = st => st === "on" ? "var(--on)" : "var(--s1)";
+  let out = clip + timeAxis(x, t0, t1, W, H);
+  const lane = (n, label) => {
+    const top = MT + n * ROW_H;
+    out += `<text class="ylab" x="${ML - 6}" y="${top + 13}" text-anchor="end">${label}</text>` +
+           `<rect class="lane" x="${ML}" y="${top + 3}" width="${Math.max(0, W - ML - MR)}" height="12" rx="2"/>`;
+    return top;
+  };
+  let top = lane(0, "Boiler told");
+  for (const [a, b, st] of commandRuns(t1)) {
+    if (b < t0) continue;
+    const x0 = x(Math.max(a, t0)), w = Math.max(2, x(b) - x0);
+    out += `<rect clip-path="url(#clip${ch.id})" fill="${colour(st)}" x="${x0.toFixed(1)}" y="${top + 3}" ` +
+           `width="${w.toFixed(1)}" height="12" rx="2"/>`;
+  }
+  top = lane(1, "Sends");
+  if (t1 - t0 <= 2 * 86400e3) {
+    for (const [ms, st, ok] of commands) {
+      if (ms < t0) continue;
+      out += `<rect clip-path="url(#clip${ch.id})" fill="${ok ? colour(st) : "var(--bad)"}" ` +
+             `x="${(x(ms) - 1).toFixed(1)}" y="${top + (ok ? 3 : 0)}" width="2" height="${ok ? 12 : 18}"/>`;
+    }
+  } else {
+    out += `<text class="ylab" x="${ML + 6}" y="${top + 13}">individual sends shown for windows up to 2 days</text>`;
+  }
+  return out + crosshair(x, H);
+}
+
+function fillCommandTip() {
+  const t = hoverT, rows = [];
+  const add = (text, col, cls) => {
+    const d = document.createElement("div");
+    if (cls) d.className = cls;
+    if (col) { const sw = document.createElement("i"); sw.style.background = col; d.append(sw); }
+    d.append(document.createTextNode(text));
+    rows.push(d);
+  };
+  add(clock(t, true), null, "tt");
+  const run = commandRuns(Date.now() + skew).find(([a, b]) => a <= t && t < b);
+  add(run ? `boiler told: heating ${run[2] === "on" ? "allowed (on)" : "blocked (off)"}`
+          : "boiler told: nothing (own controls)", run ? (run[2] === "on" ? "var(--on)" : "var(--s1)") : null);
+  let prev = null;
+  for (const c of commands) { if (c[0] > t) break; prev = c; }
+  if (prev) add(`last send ${clock(prev[0], true)}: ${prev[1]}${prev[2] ? "" : " (failed)"}`,
+                prev[2] ? null : "var(--bad)");
+  tip.replaceChildren(...rows);
+}
+
 const view = () => { const t1 = Date.now() + skew; return [t1 - windowMin * 60000, t1]; };
 
 function draw() {
   const [t0, t1] = view();
   src = currentSource();
   const s = { ...src, rows: src.rows.slice(Math.max(0, lowerBound(src, t0) - 1)) };
-  for (const ch of charts) ch.svg.innerHTML = ch.c.strips ? drawStrips(ch, s, t0, t1) : drawLines(ch, s, t0, t1);
+  for (const ch of charts) {
+    ch.svg.innerHTML = ch.c.commands ? drawCommands(ch, t0, t1)
+      : ch.c.strips ? drawStrips(ch, s, t0, t1) : drawLines(ch, s, t0, t1);
+  }
   const tier = src.bucketMs ? tiers.find(t => t.bucketMs === src.bucketMs) : null;
   document.getElementById("res").textContent = src.loading ? "loading…"
     : tier ? `${tier.name} averages · shaded band = min–max` : "every reading";
@@ -1948,7 +2103,7 @@ const tip = document.getElementById("tip");
 
 function onHover(e, ch) {
   const r = ch.svg.getBoundingClientRect(), px = e.clientX - r.left;
-  if (px < ML || px > r.width - MR || !src || !src.rows.length) {
+  if (px < ML || px > r.width - MR || (!ch.c.commands && (!src || !src.rows.length))) {
     hoverT = null; tip.hidden = true; scheduleDraw(); return;
   }
   const [t0, t1] = view();
@@ -1963,6 +2118,7 @@ function onHover(e, ch) {
 }
 
 function fillTip() {
+  if (hoverChart.c.commands) { fillCommandTip(); return; }
   if (!src || !src.rows.length) return;
   const s = src, r = nearest(s, hoverT), c = hoverChart.c, agg = s.bucketMs > 0;
   const fmt = v => v == null ? "—" : v.toFixed(c.dp);
@@ -2340,6 +2496,7 @@ function onMessage(ev) {
   if (m.type === "ping") return;
   if (m.type === "change") { addChange(m); return; }
   if (m.type === "control") { showControl(m.control); return; }
+  if (m.type === "command") { addCommand(m.row); return; }
   if (m.type === "bucket") {
     const tier = tiers.find(t => t.name === m.tier);
     if (tier) { addBucket(tier, m.row); scheduleDraw(); }
@@ -2355,6 +2512,7 @@ function onMessage(ev) {
     historyMinutes = m.historyMinutes;
     tiers = (m.tiers || []).map(t => ({ ...t, rows: null, loading: false, buffer: [], retryAt: 0 }));
     showControl(m.control);
+    loadCommands();
     buildWindows();
   } else if (m.sample) {
     samples.push(m.sample);
