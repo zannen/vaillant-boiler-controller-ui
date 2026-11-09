@@ -68,8 +68,10 @@ Now check out the server at `http://$SERVER_ADDR:8000/`.
 
 Admins can set up to 10 on/off periods per day of the week on the web page; users and viewers can see it.
 While the schedule is enabled, the app sends the boiler an eBUS `SetMode` message that blocks
-central heating outside those periods, or allows it inside them. It sends at each change and repeats
-every 10 minutes, because the boiler ends the block about 15 minutes after the last message.
+central heating outside those periods, or allows it inside them. It sends on startup, when the schedule
+is saved, at the exact minute of each on/off time, and on every 10-minute boundary of the clock
+(xx:00, xx:10, ...), because the boiler ends the block about 15 minutes after the last message.
+A failed send is retried after a minute.
 Hot water is never blocked. Disabling the schedule allows heating once; then the boiler follows its own controls.
 
 - Set the boiler's own timer to be on whenever you *might* want heating: the app can switch heating off, but not on.
