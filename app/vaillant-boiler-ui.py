@@ -595,9 +595,10 @@ class Schedule:
 
 class CommandLog:
     """Every SetMode instruction sent to the boiler: appended to <csv name>.commands.csv and the
-    last KEEP_DAYS kept in memory for the chart, as [epoch ms, "on"|"off", 1 if accepted else 0]."""
+    last KEEP_DAYS kept in memory for the chart, as [epoch ms, "on"|"off", 1 if accepted else 0, source].
+    source is "schedule", or "override:<user>" for the override button."""
 
-    HEADER = ["time", "ms", "state", "ok", "result"]
+    HEADER = ["time", "ms", "state", "ok", "result", "source"]
     KEEP_DAYS = 31
 
     def __init__(self, path, hub, writer):
@@ -619,19 +620,19 @@ class CommandLog:
             except ValueError:
                 continue
             if ms >= cutoff:
-                rows.append([ms, r[2], int(r[3] == "1")])
+                rows.append([ms, r[2], int(r[3] == "1"), r[5] or "schedule"])
         rows.sort(key=lambda r: r[0])
         with self.lock:
             self.rows.extend(rows)
         return len(rows)
 
-    def add(self, state, ok, result):
+    def add(self, state, ok, result, source):
         ms = epoch_ms()
         when = datetime.datetime.fromtimestamp(ms / 1000).isoformat(timespec="milliseconds")
         if needs_header(self.path) and not self.rows:
             self.writer.csv_row(self.HEADER, self.path)
-        self.writer.csv_row([when, ms, state, int(ok), result], self.path)
-        row = [ms, state, int(ok)]
+        self.writer.csv_row([when, ms, state, int(ok), result, source], self.path)
+        row = [ms, state, int(ok), source]
         with self.lock:
             self.rows.append(row)
             cutoff = ms - self.KEEP_DAYS * 86400000
@@ -654,12 +655,17 @@ class HeatingController(threading.Thread):
     RETRY_SECONDS. When the schedule is disabled, heating is allowed once, and then the boiler goes
     back to its own controls. The boiler's own timer still applies: the Pi can stop heating, but
     cannot start it while that timer is off.
+
+    Override: one "heating on" is sent at once, whatever the schedule says, then nothing for
+    OVERRIDE_SECONDS (the boiler holds it for about 15 minutes); then the schedule state is sent
+    and the normal 10-minute boundaries resume.
     """
 
     RESEND_SECONDS = 600  # boundary spacing; must divide an hour
     RETRY_SECONDS = 60
     MAX_SLEEP = 60  # re-check at least this often, in case the clock is stepped
     HOLD_SECONDS = 900  # how long the boiler keeps a SetMode block without a repeat
+    OVERRIDE_SECONDS = 840
 
     def __init__(self, schedule, hub, commands, host, port, flow_temp, hwc_temp):
         super().__init__(daemon=True)
@@ -671,11 +677,19 @@ class HeatingController(threading.Thread):
         self.retry_at = None    # local time to retry after a failed send
         self.last = None        # {"time", "state", "ok", "result"} of the last attempt
         self.last_ok = None     # the same, for the last attempt the boiler accepted
+        self.override = None    # {"until": local time, "by": user, "sent": bool} while overriding
+        self.requests = []      # override requests from the web, handled by step()
+        self.lock = threading.Lock()
+
+    def request_override(self, user):
+        with self.lock:
+            self.requests.append(user)
+        self.wake.set()
 
     def setmode(self, off):
         return f"auto;{self.flow_temp:g};{self.hwc_temp:g};-;{int(off)};0;0;0;0;0"
 
-    def send(self, state):
+    def send(self, state, source="schedule"):
         try:
             bus = Ebusd(self.host, self.port)
             try:
@@ -685,8 +699,8 @@ class HeatingController(threading.Thread):
             ok = not result.startswith("ERR")
         except (OSError, ConnectionError) as e:
             result, ok = f"ERR: {e}", False
-        self.last = {"time": stamp(), "state": state, "ok": ok, "result": result}
-        self.commands.add(state, ok, result)
+        self.last = {"time": stamp(), "state": state, "ok": ok, "result": result, "source": source}
+        self.commands.add(state, ok, result, source)
         if ok:
             self.last_ok = self.last
             if state != self.sent:
@@ -707,9 +721,28 @@ class HeatingController(threading.Thread):
 
     def step(self, now=None):
         now = now or datetime.datetime.now()
+        with self.lock:
+            requests, self.requests = self.requests, []
+        if requests:  # a new press restarts the override
+            until = now + datetime.timedelta(seconds=self.OVERRIDE_SECONDS)
+            self.override = {"until": until, "by": requests[-1], "sent": False}
+            self.retry_at = None
+            self.hub.record("HeatingOverride", f"on until {until:%H:%M:%S} ({requests[-1]})", stamp())
+        if self.override and now >= self.override["until"]:
+            self.override = None
+            self.due = self.retry_at = None  # back to the schedule: send its state now
+            self.hub.record("HeatingOverride", "ended", stamp())
         wanted = self.schedule.wanted(now)
         target = None if wanted is None else ("on" if wanted else "off")
-        if target is None:  # schedule disabled: if heating is blocked, release it once
+        if self.override:
+            o = self.override
+            if not o["sent"] and (self.retry_at is None or now >= self.retry_at):
+                if self.send("on", f"override:{o['by']}"):
+                    o["sent"], self.retry_at = True, None
+                else:
+                    self.retry_at = min(now + datetime.timedelta(seconds=self.RETRY_SECONDS), o["until"])
+            self.due = o["until"]
+        elif target is None:  # schedule disabled: if heating is blocked, release it once
             self.due = None
             if self.sent == "off" and (self.retry_at is None or now >= self.retry_at):
                 if self.send("on"):
@@ -729,13 +762,23 @@ class HeatingController(threading.Thread):
             self.due = self.next_slot(now)  # recomputed each time, so schedule edits take effect
         nxt = self.schedule.next_change(now)
         nxt_send = min(t for t in (self.due, self.retry_at) if t) if (self.due or self.retry_at) else None
+        o = self.override
+        if o and nxt_send == o["until"] and wanted is None and self.sent != "off":
+            nxt_send = None  # override ending with the schedule disabled: nothing more is sent
+        if nxt_send is None:
+            nxt_state = None
+        elif nxt_send == self.retry_at:
+            nxt_state = "on" if o else target
+        else:
+            nxt_state = "on" if self.schedule.wanted(nxt_send) else "off"
         self.hub.set_control({
             "enabled": wanted is not None,
             "target": target,
             "nextChange": nxt.isoformat(timespec="minutes") if nxt else None,
             "nextSend": nxt_send.isoformat(timespec="seconds") if nxt_send else None,
-            "nextState": None if nxt_send is None else (
-                target if nxt_send == self.retry_at else ("on" if self.schedule.wanted(nxt_send) else "off")),
+            "nextState": nxt_state,
+            "override": None if not o else {"until": o["until"].isoformat(timespec="seconds"),
+                                            "by": o["by"], "sent": o["sent"]},
             "lastSend": self.last,
             "lastOk": self.last_ok,
             "resendSeconds": self.RESEND_SECONDS,
@@ -1167,6 +1210,7 @@ def serve(hub, auth, controller, bind, port):
             ("GET", "/api/events"): ("_events", "read"),
             ("GET", "/api/schedule"): ("_get_schedule", "read"),
             ("PUT", "/api/schedule"): ("_put_schedule", "admin"),
+            ("POST", "/api/override"): ("_override", "control"),
         }
 
         def do_GET(self):
@@ -1287,6 +1331,13 @@ def serve(hub, auth, controller, bind, port):
                   f"(enabled: {checked['enabled']})", file=sys.stderr)
             controller.wake.set()  # apply it now
             time.sleep(0.2)  # usually lets the status below reflect the new schedule
+            self._schedule_reply()
+
+        def _override(self):
+            user = self.claims["sub"]
+            print(f"{datetime.datetime.now():%H:%M:%S} heating override by {user}", file=sys.stderr)
+            controller.request_override(user)
+            time.sleep(0.5)  # usually long enough for the send to finish
             self._schedule_reply()
 
         def _state(self):
@@ -1565,6 +1616,9 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
       <h2>Heating schedule</h2>
       <label class="kv" title="change it with Edit"><input type="checkbox" id="sched-on" disabled> enabled</label>
       <button id="sched-edit" class="btn" type="button" hidden>Edit</button>
+      <button id="override" class="btn" type="button" hidden
+        title="send one 'heating on' now, whatever the schedule says; the schedule takes over again after 14 minutes">Heating ON for 14 min</button>
+      <span class="kv" id="override-info"></span>
     </div>
     <div id="sched-view"></div>
     <form id="sched-form" hidden>
@@ -1703,7 +1757,7 @@ const CHARTS = [
   { title: "Temperatures", unit: "°C", dp: 1, minSpan: 4, wide: true,
     series: [["FlowTemp", "Flow (d.40)", "var(--s1)"], ["ReturnTemp", "Return (d.41)", "var(--s2)"], ["HwcTemp", "Hot water", "var(--s3)"]] },
   { title: "Boiler instructions (SetMode)", wide: true, commands: true,
-    legend: [["heating allowed (on)", "var(--on)"], ["heating blocked (off)", "var(--s1)"], ["send failed", "var(--bad)"]] },
+    legend: [["heating allowed (on)", "var(--on)"], ["heating blocked (off)", "var(--s1)"], ["send failed", "var(--bad)"], ["override (tall tick)", "var(--on)"]] },
   { title: "Burner & demand (gas valve d.30, HW demand d.22)", wide: true,
     strips: [["Flame", "Flame"], ["Gasvalve", "Gas valve"], ["HwcDemand", "HW demand"]] },
   { title: "Flow rise", unit: "°C/s", dp: 1, minSpan: 2, zero: true, series: [["rise", "Flow rise", "var(--s1)"]] },
@@ -2074,15 +2128,20 @@ function drawCommands(ch, t0, t1) {
   }
   top = lane(1, "Sends");
   if (t1 - t0 <= 2 * 86400e3) {
-    for (const [ms, st, ok] of commands) {
+    for (const [ms, st, ok, source] of commands) {
       if (ms < t0) continue;
+      const tall = !ok || (source || "").startsWith("override:");  // failures and overrides stand out
       out += `<rect clip-path="url(#clip${ch.id})" fill="${ok ? colour(st) : "var(--bad)"}" ` +
-             `x="${(x(ms) - 1).toFixed(1)}" y="${top + (ok ? 3 : 0)}" width="2" height="${ok ? 12 : 18}"/>`;
+             `x="${(x(ms) - (tall ? 1.5 : 1)).toFixed(1)}" y="${top + (tall ? 0 : 3)}" width="${tall ? 3 : 2}" height="${tall ? 18 : 12}"/>`;
     }
   } else {
     out += `<text class="ylab" x="${ML + 6}" y="${top + 13}">individual sends shown for windows up to 2 days</text>`;
   }
   return out + crosshair(x, H);
+}
+
+function sourceText(source) {
+  return source && source.startsWith("override:") ? ` (override by ${source.slice(9)})` : "";
 }
 
 function fillCommandTip() {
@@ -2100,7 +2159,7 @@ function fillCommandTip() {
           : "boiler told: nothing (own controls)", run ? (run[2] === "on" ? "var(--on)" : "var(--s1)") : null);
   let prev = null;
   for (const c of commands) { if (c[0] > t) break; prev = c; }
-  if (prev) add(`last send ${clock(prev[0], true)}: ${prev[1]}${prev[2] ? "" : " (failed)"}`,
+  if (prev) add(`last send ${clock(prev[0], true)}: ${prev[1]}${sourceText(prev[3])}${prev[2] ? "" : " (failed)"}`,
                 prev[2] ? null : "var(--bad)");
   tip.replaceChildren(...rows);
 }
@@ -2284,11 +2343,11 @@ function showInstruction() {
   state.textContent = ok ? `heating ${ok.state.toUpperCase()}`
     : !control ? "unknown (no status from the app yet)"
     : !control.enabled ? "none: the heating schedule is disabled" : "none sent yet";
-  when.textContent = ok ? `at ${ok.time.slice(11, 19)} (${ago(ok.time)})` : "";
+  when.textContent = ok ? `at ${ok.time.slice(11, 19)} (${ago(ok.time)})${sourceText(ok.source)}` : "";
   fail.textContent = last && !last.ok ? `· ${last.state} failed at ${last.time.slice(11, 19)}: ${last.result}` : "";
 
   const next = document.getElementById("cmd-next"), nextWhen = document.getElementById("cmd-next-when");
-  const due = control && control.enabled && control.nextSend;
+  const due = control && control.nextSend;
   next.className = "cmd-state" + (due ? " " + control.nextState : "");
   next.textContent = due ? `heating ${control.nextState.toUpperCase()}`
     : !control ? "unknown" : !control.enabled ? "none: the heating schedule is disabled" : "—";
@@ -2304,7 +2363,31 @@ function showControl(c) {
   control = c;
   showEnabled();
   showInstruction();
+  showOverride();
 }
+
+// Override button: users and admins (the server checks the role too)
+function showOverride() {
+  const role = (getAuth() || {}).role, btn = document.getElementById("override");
+  const info = document.getElementById("override-info"), o = control && control.override;
+  btn.hidden = role !== "user" && role !== "admin";
+  btn.textContent = o ? "Restart override" : "Heating ON for 14 min";
+  info.textContent = o ? `override by ${o.by}: heating ON until ${o.until.slice(11, 19)} (${until(o.until)})`
+    + (o.sent ? "" : " · not sent yet, retrying") : "";
+  info.classList.toggle("err", !!(o && !o.sent));
+}
+
+document.getElementById("override").addEventListener("click", () => {
+  const btn = document.getElementById("override"), info = document.getElementById("override-info");
+  btn.disabled = true;
+  info.textContent = "sending…";
+  api("/api/override", { method: "POST" }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `override failed (${r.status})`);
+    if (d.status) showControl(d.status);
+  }).catch(ex => { info.textContent = ex.message; info.classList.add("err"); })
+    .finally(() => { btn.disabled = false; });
+});
 
 function showEnabled() {
   const enabled = control ? control.enabled : sched ? sched.enabled : null;
@@ -2574,6 +2657,7 @@ setInterval(() => {
   checkConnection(false);
   showAge();
   showInstruction();
+  showOverride();
   scheduleDraw();  // keep the charts scrolling between updates
 }, 1000);
 addEventListener("resize", scheduleDraw);
