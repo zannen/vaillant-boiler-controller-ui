@@ -1471,15 +1471,16 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 .cmd-state { padding: 0 6px; border-radius: 4px; }
 .cmd-state.on { background: var(--on); color: #111; }
 .cmd-state.off { background: var(--track); color: var(--text); }
-.srow { display: grid; grid-template-columns: 44px 1fr minmax(120px, 34%); gap: 10px; align-items: center; padding: 3px 0; }
+.srow { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; padding: 3px 0; }
 .srow .day { color: var(--text2); }
 .srow .day.today { color: var(--text); font-weight: 600; }
-.srow .times { color: var(--text2); font-size: 13px; font-variant-numeric: tabular-nums; }
 .strip { position: relative; height: 14px; background: var(--track); border-radius: 3px; }
 .strip span { position: absolute; top: 0; bottom: 0; background: var(--on); border-radius: 2px; min-width: 2px; }
 .strip i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); }
 .hours { position: relative; height: 14px; font-size: 11px; color: var(--muted); }
 .hours span { position: absolute; transform: translateX(-50%); }
+.hours span:first-child { transform: none; }
+.hours span:last-child { transform: translateX(-100%); }
 .eday { display: grid; grid-template-columns: 44px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid #252b33; }
 .eday .periods { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
 .period { display: inline-flex; gap: 4px; align-items: center; }
@@ -2214,7 +2215,7 @@ function renderSchedule() {
     hours.append(s);
   }
   const head = el("div", "srow");
-  head.append(el("span"), hours, el("span"));
+  head.append(el("span"), hours);
   rows.push(head);
   for (const day of sched.dayOrder) {
     const row = el("div", "srow");
@@ -2232,9 +2233,7 @@ function renderSchedule() {
       mark.title = "now";
       strip.append(mark);
     }
-    const periods = sched.days[day];
-    row.append(el("span", "day" + (day === today ? " today" : ""), DAY_LABELS[day]), strip,
-               el("span", "times", periods.length ? periods.map(p => p.join("–")).join(", ") : "off all day"));
+    row.append(el("span", "day" + (day === today ? " today" : ""), DAY_LABELS[day]), strip);
     rows.push(row);
   }
   view.replaceChildren(...rows);
