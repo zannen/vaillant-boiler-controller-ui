@@ -647,17 +647,18 @@ class CommandLog:
 class HeatingController(threading.Thread):
     """Applies the schedule by telling the boiler, over eBUS, to block or allow central heating.
 
-    The block only lasts about 15 minutes after the last SetMode message, so the current state
-    is re-sent every RESEND_SECONDS. A change of state is sent at once. When the schedule is
-    disabled, heating is allowed once, and then the boiler goes back to its own controls.
-    The boiler's own timer still applies: the Pi can stop heating, but cannot start it while
-    that timer is off.
+    The block only lasts about 15 minutes after the last SetMode message, so the current state is
+    re-sent on every 10-minute boundary of the clock (xx:00, xx:10, ...). It is also sent at once
+    on startup and when the schedule is saved, and at the exact minute of each schedule on/off time
+    (e.g. 07:31), then again on the following boundaries. A failed send is retried after
+    RETRY_SECONDS. When the schedule is disabled, heating is allowed once, and then the boiler goes
+    back to its own controls. The boiler's own timer still applies: the Pi can stop heating, but
+    cannot start it while that timer is off.
     """
 
-    CHECK_SECONDS = 15
-    RESEND_SECONDS = 600
+    RESEND_SECONDS = 600  # boundary spacing; must divide an hour
     RETRY_SECONDS = 60
-
+    MAX_SLEEP = 60  # re-check at least this often, in case the clock is stepped
     HOLD_SECONDS = 900  # how long the boiler keeps a SetMode block without a repeat
 
     def __init__(self, schedule, hub, commands, host, port, flow_temp, hwc_temp):
@@ -666,8 +667,8 @@ class HeatingController(threading.Thread):
         self.flow_temp, self.hwc_temp = flow_temp, hwc_temp
         self.wake = threading.Event()
         self.sent = None        # "on"/"off" last confirmed by ebusd, or None
-        self.sent_at = 0.0      # monotonic time of that send
-        self.attempt_at = 0.0   # monotonic time of the last attempt (success or not)
+        self.due = None         # local time of the next regular send (boundary or schedule change)
+        self.retry_at = None    # local time to retry after a failed send
         self.last = None        # {"time", "state", "ok", "result"} of the last attempt
         self.last_ok = None     # the same, for the last attempt the boiler accepted
 
@@ -675,7 +676,6 @@ class HeatingController(threading.Thread):
         return f"auto;{self.flow_temp:g};{self.hwc_temp:g};-;{int(off)};0;0;0;0;0"
 
     def send(self, state):
-        self.attempt_at = time.monotonic()
         try:
             bus = Ebusd(self.host, self.port)
             try:
@@ -691,32 +691,60 @@ class HeatingController(threading.Thread):
             self.last_ok = self.last
             if state != self.sent:
                 self.hub.record("HeatingSchedule", state, stamp())
-            self.sent, self.sent_at = state, self.attempt_at
+            self.sent = state
         else:
             print(f"{datetime.datetime.now():%H:%M:%S} SetMode heating {state} failed: {result}", file=sys.stderr)
         return ok
 
-    def step(self):
-        now = datetime.datetime.now()
+    def next_slot(self, now):
+        """The next 10-minute boundary after now, or the next schedule change if that comes first."""
+        step = self.RESEND_SECONDS
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        secs = (now - midnight).total_seconds()
+        boundary = midnight + datetime.timedelta(seconds=(secs // step + 1) * step)
+        change = self.schedule.next_change(now)
+        return min(boundary, change) if change else boundary
+
+    def step(self, now=None):
+        now = now or datetime.datetime.now()
         wanted = self.schedule.wanted(now)
         target = None if wanted is None else ("on" if wanted else "off")
-        mono = time.monotonic()
-        retry_ok = self.last is None or self.last["ok"] or mono - self.attempt_at >= self.RETRY_SECONDS
-        if target is None:
-            if self.sent == "off" and retry_ok:  # schedule switched off: release the block once
+        if target is None:  # schedule disabled: if heating is blocked, release it once
+            self.due = None
+            if self.sent == "off" and (self.retry_at is None or now >= self.retry_at):
                 if self.send("on"):
-                    self.sent = None
-        elif (target != self.sent or mono - self.sent_at >= self.RESEND_SECONDS) and retry_ok:
-            self.send(target)
+                    self.sent, self.retry_at = None, None
+                else:
+                    self.retry_at = now + datetime.timedelta(seconds=self.RETRY_SECONDS)
+            elif self.sent != "off":
+                self.retry_at = None
+        else:
+            failed = self.retry_at is not None
+            need = (self.due is None or now >= self.due
+                    or (failed and now >= self.retry_at)
+                    or (not failed and target != self.sent))  # e.g. the schedule was just saved
+            if need:
+                ok = self.send(target)
+                self.retry_at = None if ok else now + datetime.timedelta(seconds=self.RETRY_SECONDS)
+            self.due = self.next_slot(now)  # recomputed each time, so schedule edits take effect
         nxt = self.schedule.next_change(now)
+        nxt_send = min(t for t in (self.due, self.retry_at) if t) if (self.due or self.retry_at) else None
         self.hub.set_control({
             "enabled": wanted is not None,
             "target": target,
             "nextChange": nxt.isoformat(timespec="minutes") if nxt else None,
+            "nextSend": nxt_send.isoformat(timespec="seconds") if nxt_send else None,
             "lastSend": self.last,
             "lastOk": self.last_ok,
             "resendSeconds": self.RESEND_SECONDS,
         })
+
+    def sleep_seconds(self, now):
+        times = [t for t in (self.due, self.retry_at) if t]
+        if not times:
+            return self.MAX_SLEEP
+        # wake just after the due time; if woken early, the next step sees it isn't due and waits again
+        return max(0.01, min(self.MAX_SLEEP, (min(times) - now).total_seconds() + 0.02))
 
     def run(self):
         while True:
@@ -724,7 +752,7 @@ class HeatingController(threading.Thread):
                 self.step()
             except Exception as e:  # never let the controller die quietly
                 print(f"{datetime.datetime.now():%H:%M:%S} heating controller error: {e!r}", file=sys.stderr)
-            self.wake.wait(self.CHECK_SECONDS)
+            self.wake.wait(self.sleep_seconds(datetime.datetime.now()))
             self.wake.clear()
 
 
