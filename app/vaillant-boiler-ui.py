@@ -1822,12 +1822,12 @@ function tickLabel(t, step, span) {
   return clock(t, step < 60e3);
 }
 
-function timeAxis(x, t0, t1, W, H) {
+function timeAxis(x, t0, t1, W, H, baseline = true) {  // lane charts skip the baseline: it looks like another lane
   const steps = [5e3, 10e3, 15e3, 30e3, 60e3, 120e3, 300e3, 600e3, 900e3, 1800e3, 3600e3,
                  7200e3, 10800e3, 21600e3, 43200e3, 86400e3, 172800e3, 604800e3];
   const step = steps.find(s => s >= (t1 - t0) / 6) || 604800e3;
   const off = -new Date(t1).getTimezoneOffset() * 60000;  // put hour/day ticks on local time
-  let out = `<line class="base" x1="${ML}" x2="${W - MR}" y1="${H - MB}" y2="${H - MB}"/>`;
+  let out = baseline ? `<line class="base" x1="${ML}" x2="${W - MR}" y1="${H - MB}" y2="${H - MB}"/>` : "";
   for (let t = Math.ceil((t0 + off) / step) * step - off; t <= t1; t += step) {
     const px = x(t).toFixed(1);
     out += `<line class="gridl" x1="${px}" x2="${px}" y1="${MT}" y2="${H - MB}"/>` +
@@ -1959,7 +1959,7 @@ function drawLines(ch, s, t0, t1) {
 
 function drawStrips(ch, s, t0, t1) {
   const { c } = ch, { W, H, x, clip } = frame(ch, t0, t1);
-  let out = clip + timeAxis(x, t0, t1, W, H);
+  let out = clip + timeAxis(x, t0, t1, W, H, false);
   c.strips.forEach(([k, label], n) => {
     const top = MT + n * ROW_H;
     out += `<text class="ylab" x="${ML - 6}" y="${top + 13}" text-anchor="end">${label}</text>` +
@@ -2029,7 +2029,7 @@ function commandRuns(t1) {
 function drawCommands(ch, t0, t1) {
   const { W, H, x, clip } = frame(ch, t0, t1);
   const colour = st => st === "on" ? "var(--on)" : "var(--s1)";
-  let out = clip + timeAxis(x, t0, t1, W, H);
+  let out = clip + timeAxis(x, t0, t1, W, H, false);
   const lane = (n, label) => {
     const top = MT + n * ROW_H;
     out += `<text class="ylab" x="${ML - 6}" y="${top + 13}" text-anchor="end">${label}</text>` +
