@@ -74,6 +74,11 @@ is saved, at the exact minute of each on/off time, and on every 10-minute bounda
 A failed send is retried after a minute.
 Hot water is never blocked. Disabling the schedule allows heating once; then the boiler follows its own controls.
 
+Users and admins also get a **Heating ON for 14 min** button. It sends one "heating on" at once, whatever
+the schedule says, then nothing for 14 minutes (the boiler holds it for about 15); then the schedule's
+state is sent and the 10-minute boundaries resume. Pressing it again restarts the 14 minutes.
+Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
+
 - Set the boiler's own timer to be on whenever you *might* want heating: the app can switch heating off, but not on.
 - ebusd must allow writes: add `--accesslevel=*` to `EBUSD_OPTS` in `/etc/default/ebusd`.
 - The flow and hot water temperatures sent with each message default to 75 and 52.5 °C; change them with
