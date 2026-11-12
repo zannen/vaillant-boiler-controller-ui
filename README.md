@@ -58,11 +58,32 @@ The package installs:
 | `/usr/lib/systemd/system/vaillant-boiler-ui.service` | service, enabled on install; it waits until `users.htpasswd` has a user |
 | `/etc/vaillant-boiler-ui/users.htpasswd`, `roles` | logins (root-owned, readable by the service only) |
 | `/etc/default/vaillant-boiler-ui` | extra options in `BOILER_UI_OPTS` |
-| `/var/lib/vaillant-boiler-ui/` | CSV logs, summaries, change log and token signing key |
+| `/var/lib/vaillant-boiler-ui/` | CSV logs, summaries, change log, boiler instructions (`boiler.commands.csv`), heating schedule and token signing key |
 
 It runs as the `boiler-ui` system user. `sudo apt purge vaillant-boiler-ui` deletes the logins and all logged data.
 
 Now check out the server at `http://$SERVER_ADDR:8000/`.
+
+## Heating schedule
+
+Admins can set up to 10 on/off periods per day of the week on the web page; users and viewers can see it.
+While the schedule is enabled, the app sends the boiler an eBUS `SetMode` message that blocks
+central heating outside those periods, or allows it inside them. It sends on startup, when the schedule
+is saved, at the exact minute of each on/off time, and on every 10-minute boundary of the clock
+(xx:00, xx:10, ...), because the boiler ends the block about 15 minutes after the last message.
+A failed send is retried after a minute.
+Hot water is never blocked. Disabling the schedule allows heating once; then the boiler follows its own controls.
+
+Users and admins also get a **Heating ON for 14 min** button. It sends one "heating on" at once, whatever
+the schedule says, then nothing for 14 minutes (the boiler holds it for about 15); then the schedule's
+state is sent and the 10-minute boundaries resume. Pressing it again restarts the 14 minutes.
+Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
+
+- Set the boiler's own timer to be on whenever you *might* want heating: the app can switch heating off, but not on.
+- ebusd must allow writes: add `--accesslevel=*` to `EBUSD_OPTS` in `/etc/default/ebusd`.
+- The flow and hot water temperatures sent with each message default to 75 and 52.5 °C; change them with
+  `--flow-temp` and `--hwc-temp` in `BOILER_UI_OPTS`.
+- If the app or the Pi stops, the boiler returns to its own controls within about 15 minutes.
 
 ## Hardware
 

@@ -455,7 +455,17 @@ class Ebusd:
         self.f = self.sock.makefile("rw", newline="\n")
 
     def read(self, name):
-        self.f.write(f"read -f -c bai {name}\n")
+        return self.command(f"read -f -c bai {name}")
+
+    def write(self, name, value):
+        """Write a message; ebusd answers "done" or "empty" on success, "ERR: ..." on failure."""
+        return self.command(f"write -c bai {name} {value}")
+
+    def close(self):
+        self.sock.close()
+
+    def command(self, line):
+        self.f.write(line + "\n")
         self.f.flush()
         lines = []
         while True:  # ebusd ends each response with an empty line
@@ -466,6 +476,329 @@ class Ebusd:
             if not line:
                 return " ".join(lines)
             lines.append(line)
+
+
+# ---------------------------------------------------------------- heating schedule
+
+DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # datetime.weekday() order
+MAX_PERIODS = 10  # on/off pairs per day
+
+
+def parse_hhmm(text, allow_2400=False):
+    """Minutes since midnight for "HH:MM", or None. "24:00" (end of day) only if allowed."""
+    if not isinstance(text, str) or len(text) != 5 or text[2] != ":":
+        return None
+    try:
+        h, m = int(text[:2]), int(text[3:])
+    except ValueError:
+        return None
+    if allow_2400 and (h, m) == (24, 0):
+        return 1440
+    return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
+
+
+def hhmm(minutes):
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def validate_schedule(obj):
+    """Checked, normalised copy of a schedule from the web page, or (None, error message)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("enabled"), bool) or not isinstance(obj.get("days"), dict):
+        return None, 'expected {"enabled": true|false, "days": {"mon": [["06:30", "08:30"], ...], ...}}'
+    unknown = set(obj["days"]) - set(DAY_KEYS)
+    if unknown:
+        return None, f"unknown day(s): {', '.join(sorted(unknown))}"
+    days = {}
+    for day in DAY_KEYS:
+        periods = obj["days"].get(day, [])
+        if not isinstance(periods, list) or len(periods) > MAX_PERIODS:
+            return None, f"{day}: at most {MAX_PERIODS} on/off periods"
+        spans = []
+        for p in periods:
+            if not (isinstance(p, list) and len(p) == 2):
+                return None, f"{day}: each period must be [on, off]"
+            on, off = parse_hhmm(p[0]), parse_hhmm(p[1], allow_2400=True)
+            if on is None or off is None:
+                return None, f"{day}: times must be HH:MM (off may be 24:00), got {p[0]!r}-{p[1]!r}"
+            if on >= off:
+                return None, f"{day}: {p[0]}-{p[1]}: on must be before off (use 24:00 for midnight)"
+            spans.append((on, off))
+        spans.sort()
+        for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+            if b0 < a1:
+                return None, f"{day}: {hhmm(a0)}-{hhmm(a1)} overlaps {hhmm(b0)}-{hhmm(b1)}"
+        days[day] = [[hhmm(a), hhmm(b)] for a, b in spans]
+    return {"enabled": obj["enabled"], "days": days}, None
+
+
+class Schedule:
+    """7-day heating schedule, kept in a JSON file and saved atomically."""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = {"enabled": False, "days": {d: [] for d in DAY_KEYS}, "updatedBy": None, "updatedAt": None}
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    saved = json.load(f)
+                checked, err = validate_schedule(saved)
+                if err:
+                    raise ValueError(err)
+                self.data = {**checked, "updatedBy": saved.get("updatedBy"), "updatedAt": saved.get("updatedAt")}
+            except (OSError, ValueError) as e:
+                sys.exit(f"cannot use schedule {path}: {e}; fix or delete it")
+
+    def get(self):
+        with self.lock:
+            return json.loads(json.dumps(self.data))
+
+    def set(self, checked, user):
+        data = {**checked, "updatedBy": user, "updatedAt": stamp()}
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
+        with self.lock:
+            self.data = data
+        return self.get()
+
+    def wanted(self, when):
+        """True if heating should be allowed at this (local) time, False if not, None if disabled."""
+        with self.lock:
+            if not self.data["enabled"]:
+                return None
+            m = when.hour * 60 + when.minute
+            return any(parse_hhmm(a) <= m < parse_hhmm(b, True) for a, b in self.data["days"][DAY_KEYS[when.weekday()]])
+
+    def next_change(self, when):
+        """Local time at which wanted() next changes, or None (always on, always off, or disabled)."""
+        now = self.wanted(when)
+        if now is None:
+            return None
+        with self.lock:
+            days = self.data["days"]
+        midnight = when.replace(hour=0, minute=0, second=0, microsecond=0)
+        edges = sorted(
+            midnight + datetime.timedelta(days=d, minutes=parse_hhmm(t, True))
+            for d in range(8)
+            for p in days[DAY_KEYS[(when.weekday() + d) % 7]]
+            for t in p
+        )
+        for t in edges:
+            if t > when and self.wanted(t) != now:
+                return t
+        return None
+
+
+class CommandLog:
+    """Every SetMode instruction sent to the boiler: appended to <csv name>.commands.csv and the
+    last KEEP_DAYS kept in memory for the chart, as [epoch ms, "on"|"off", 1 if accepted else 0, source].
+    source is "schedule", or "override:<user>" for the override button."""
+
+    HEADER = ["time", "ms", "state", "ok", "result", "source"]
+    KEEP_DAYS = 31
+
+    def __init__(self, path, hub, writer):
+        self.path, self.hub, self.writer = path, hub, writer
+        self.lock = threading.Lock()
+        self.rows = collections.deque(maxlen=60000)
+
+    def load(self):
+        if not os.path.exists(self.path):
+            return 0
+        cutoff = epoch_ms() - self.KEEP_DAYS * 86400000
+        lines, _ = tail_lines(self.path, self.rows.maxlen * 120)
+        rows = []
+        for r in csv.reader(lines):
+            if len(r) != len(self.HEADER) or r[0] == "time" or r[2] not in ("on", "off"):
+                continue
+            try:
+                ms = int(r[1])
+            except ValueError:
+                continue
+            if ms >= cutoff:
+                rows.append([ms, r[2], int(r[3] == "1"), r[5] or "schedule"])
+        rows.sort(key=lambda r: r[0])
+        with self.lock:
+            self.rows.extend(rows)
+        return len(rows)
+
+    def add(self, state, ok, result, source):
+        ms = epoch_ms()
+        when = datetime.datetime.fromtimestamp(ms / 1000).isoformat(timespec="milliseconds")
+        if needs_header(self.path) and not self.rows:
+            self.writer.csv_row(self.HEADER, self.path)
+        self.writer.csv_row([when, ms, state, int(ok), result, source], self.path)
+        row = [ms, state, int(ok), source]
+        with self.lock:
+            self.rows.append(row)
+            cutoff = ms - self.KEEP_DAYS * 86400000
+            while self.rows and self.rows[0][0] < cutoff:
+                self.rows.popleft()
+        self.hub.broadcast({"type": "command", "row": row})
+
+    def get(self):
+        with self.lock:
+            return list(self.rows)
+
+
+class HeatingController(threading.Thread):
+    """Applies the schedule by telling the boiler, over eBUS, to block or allow central heating.
+
+    The block only lasts about 15 minutes after the last SetMode message, so the current state is
+    re-sent on every 10-minute boundary of the clock (xx:00, xx:10, ...). It is also sent at once
+    on startup and when the schedule is saved, and at the exact minute of each schedule on/off time
+    (e.g. 07:31), then again on the following boundaries. A failed send is retried after
+    RETRY_SECONDS. When the schedule is disabled, heating is allowed once, and then the boiler goes
+    back to its own controls. The boiler's own timer still applies: the Pi can stop heating, but
+    cannot start it while that timer is off.
+
+    Override: one "heating on" is sent at once, whatever the schedule says, then nothing for
+    OVERRIDE_SECONDS (the boiler holds it for about 15 minutes); then the schedule state is sent
+    and the normal 10-minute boundaries resume.
+    """
+
+    RESEND_SECONDS = 600  # boundary spacing; must divide an hour
+    RETRY_SECONDS = 60
+    MAX_SLEEP = 60  # re-check at least this often, in case the clock is stepped
+    HOLD_SECONDS = 900  # how long the boiler keeps a SetMode block without a repeat
+    OVERRIDE_SECONDS = 840
+
+    def __init__(self, schedule, hub, commands, host, port, flow_temp, hwc_temp):
+        super().__init__(daemon=True)
+        self.schedule, self.hub, self.commands, self.host, self.port = schedule, hub, commands, host, port
+        self.flow_temp, self.hwc_temp = flow_temp, hwc_temp
+        self.wake = threading.Event()
+        self.sent = None        # "on"/"off" last confirmed by ebusd, or None
+        self.due = None         # local time of the next regular send (boundary or schedule change)
+        self.retry_at = None    # local time to retry after a failed send
+        self.last = None        # {"time", "state", "ok", "result"} of the last attempt
+        self.last_ok = None     # the same, for the last attempt the boiler accepted
+        self.override = None    # {"until": local time, "by": user, "sent": bool} while overriding
+        self.requests = []      # override requests from the web, handled by step()
+        self.lock = threading.Lock()
+
+    def request_override(self, user):
+        with self.lock:
+            self.requests.append(user)
+        self.wake.set()
+
+    def setmode(self, off):
+        return f"auto;{self.flow_temp:g};{self.hwc_temp:g};-;{int(off)};0;0;0;0;0"
+
+    def send(self, state, source="schedule"):
+        try:
+            bus = Ebusd(self.host, self.port)
+            try:
+                result = bus.write("SetMode", self.setmode(state == "off"))
+            finally:
+                bus.close()
+            ok = not result.startswith("ERR")
+        except (OSError, ConnectionError) as e:
+            result, ok = f"ERR: {e}", False
+        self.last = {"time": stamp(), "state": state, "ok": ok, "result": result, "source": source}
+        self.commands.add(state, ok, result, source)
+        if ok:
+            self.last_ok = self.last
+            if state != self.sent:
+                self.hub.record("HeatingSchedule", state, stamp())
+            self.sent = state
+        else:
+            print(f"{datetime.datetime.now():%H:%M:%S} SetMode heating {state} failed: {result}", file=sys.stderr)
+        return ok
+
+    def next_slot(self, now):
+        """The next 10-minute boundary after now, or the next schedule change if that comes first."""
+        step = self.RESEND_SECONDS
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        secs = (now - midnight).total_seconds()
+        boundary = midnight + datetime.timedelta(seconds=(secs // step + 1) * step)
+        change = self.schedule.next_change(now)
+        return min(boundary, change) if change else boundary
+
+    def step(self, now=None):
+        now = now or datetime.datetime.now()
+        with self.lock:
+            requests, self.requests = self.requests, []
+        if requests:  # a new press restarts the override
+            until = now + datetime.timedelta(seconds=self.OVERRIDE_SECONDS)
+            self.override = {"until": until, "by": requests[-1], "sent": False}
+            self.retry_at = None
+            self.hub.record("HeatingOverride", f"on until {until:%H:%M:%S} ({requests[-1]})", stamp())
+        if self.override and now >= self.override["until"]:
+            self.override = None
+            self.due = self.retry_at = None  # back to the schedule: send its state now
+            self.hub.record("HeatingOverride", "ended", stamp())
+        wanted = self.schedule.wanted(now)
+        target = None if wanted is None else ("on" if wanted else "off")
+        if self.override:
+            o = self.override
+            if not o["sent"] and (self.retry_at is None or now >= self.retry_at):
+                if self.send("on", f"override:{o['by']}"):
+                    o["sent"], self.retry_at = True, None
+                else:
+                    self.retry_at = min(now + datetime.timedelta(seconds=self.RETRY_SECONDS), o["until"])
+            self.due = o["until"]
+        elif target is None:  # schedule disabled: if heating is blocked, release it once
+            self.due = None
+            if self.sent == "off" and (self.retry_at is None or now >= self.retry_at):
+                if self.send("on"):
+                    self.sent, self.retry_at = None, None
+                else:
+                    self.retry_at = now + datetime.timedelta(seconds=self.RETRY_SECONDS)
+            elif self.sent != "off":
+                self.retry_at = None
+        else:
+            failed = self.retry_at is not None
+            need = (self.due is None or now >= self.due
+                    or (failed and now >= self.retry_at)
+                    or (not failed and target != self.sent))  # e.g. the schedule was just saved
+            if need:
+                ok = self.send(target)
+                self.retry_at = None if ok else now + datetime.timedelta(seconds=self.RETRY_SECONDS)
+            self.due = self.next_slot(now)  # recomputed each time, so schedule edits take effect
+        nxt = self.schedule.next_change(now)
+        nxt_send = min(t for t in (self.due, self.retry_at) if t) if (self.due or self.retry_at) else None
+        o = self.override
+        if o and nxt_send == o["until"] and wanted is None and self.sent != "off":
+            nxt_send = None  # override ending with the schedule disabled: nothing more is sent
+        if nxt_send is None:
+            nxt_state = None
+        elif nxt_send == self.retry_at:
+            nxt_state = "on" if o else target
+        else:
+            nxt_state = "on" if self.schedule.wanted(nxt_send) else "off"
+        self.hub.set_control({
+            "enabled": wanted is not None,
+            "target": target,
+            "nextChange": nxt.isoformat(timespec="minutes") if nxt else None,
+            "nextSend": nxt_send.isoformat(timespec="seconds") if nxt_send else None,
+            "nextState": nxt_state,
+            "override": None if not o else {"until": o["until"].isoformat(timespec="seconds"),
+                                            "by": o["by"], "sent": o["sent"]},
+            "lastSend": self.last,
+            "lastOk": self.last_ok,
+            "resendSeconds": self.RESEND_SECONDS,
+        })
+
+    def sleep_seconds(self, now):
+        times = [t for t in (self.due, self.retry_at) if t]
+        if not times:
+            return self.MAX_SLEEP
+        # wake just after the due time; if woken early, the next step sees it isn't due and waits again
+        return max(0.01, min(self.MAX_SLEEP, (min(times) - now).total_seconds() + 0.02))
+
+    def run(self):
+        while True:
+            try:
+                self.step()
+            except Exception as e:  # never let the controller die quietly
+                print(f"{datetime.datetime.now():%H:%M:%S} heating controller error: {e!r}", file=sys.stderr)
+            self.wake.wait(self.sleep_seconds(datetime.datetime.now()))
+            self.wake.clear()
 
 
 class FileWriter(threading.Thread):
@@ -540,6 +873,14 @@ class Hub:
         self.connected = False
         self.updated = None
         self.writer = writer
+        self.control = None  # heating controller status
+
+    def set_control(self, status):
+        with self.lock:
+            if status == self.control:
+                return
+            self.control = status
+            self._broadcast({"type": "control", "control": status})
 
     def snapshot(self):  # caller holds the lock
         return {
@@ -554,6 +895,7 @@ class Hub:
             "historyMinutes": self.history_minutes,
             "history": list(self.history),
             "tiers": [a.info() for a in self.aggs],
+            "control": self.control,
         }
 
     def agg_rows(self, name):
@@ -573,6 +915,10 @@ class Hub:
         with self.lock:
             if q in self.clients:
                 self.clients.remove(q)
+
+    def broadcast(self, msg):
+        with self.lock:
+            self._broadcast(msg)
 
     def _broadcast(self, msg):  # caller holds the lock
         for q in list(self.clients):
@@ -845,8 +1191,9 @@ SECURITY_HEADERS = {
 }
 
 
-def serve(hub, auth, bind, port):
+def serve(hub, auth, controller, bind, port):
     started = time.time()
+    schedule = controller.schedule
 
     class Handler(BaseHTTPRequestHandler):
         # path -> (method name, permission needed); None = no token needed
@@ -859,7 +1206,11 @@ def serve(hub, auth, bind, port):
             ("GET", "/api/whoami"): ("_whoami", "read"),
             ("GET", "/api/state"): ("_state", "read"),
             ("GET", "/api/agg"): ("_agg", "read"),
+            ("GET", "/api/commands"): ("_commands", "read"),
             ("GET", "/api/events"): ("_events", "read"),
+            ("GET", "/api/schedule"): ("_get_schedule", "read"),
+            ("PUT", "/api/schedule"): ("_put_schedule", "admin"),
+            ("POST", "/api/override"): ("_override", "control"),
         }
 
         def do_GET(self):
@@ -867,6 +1218,9 @@ def serve(hub, auth, bind, port):
 
         def do_POST(self):
             self._dispatch("POST")
+
+        def do_PUT(self):
+            self._dispatch("PUT")
 
         def _dispatch(self, method):
             path, _, self.query = self.path.partition("?")
@@ -901,12 +1255,12 @@ def serve(hub, auth, bind, port):
         def _json(self, code, obj, headers=None):
             self._send(code, "application/json", json.dumps(obj, separators=(",", ":")).encode(), headers)
 
-        def _body(self):
+        def _body(self, limit=4096):
             try:
                 n = int(self.headers.get("Content-Length", 0))
             except ValueError:
                 n = 0
-            if not 0 < n <= 4096:
+            if not 0 < n <= limit:
                 return None
             try:
                 obj = json.loads(self.rfile.read(n))
@@ -950,10 +1304,49 @@ def serve(hub, auth, bind, port):
             self._json(200, {"user": c["sub"], "role": c["role"], "permissions": sorted(ROLES[c["role"]]),
                              "expiresIn": int(c["exp"] - time.time())})
 
+        def _schedule_reply(self, code=200):
+            with hub.lock:
+                status = hub.control
+            self._json(code, {**schedule.get(), "maxPeriods": MAX_PERIODS, "dayOrder": DAY_KEYS,
+                              "status": status})
+
+        def _get_schedule(self):
+            self._schedule_reply()
+
+        def _put_schedule(self):
+            body = self._body(limit=32768)
+            if body is None:
+                self._json(400, {"error": "expected a JSON schedule"})
+                return
+            checked, err = validate_schedule(body)
+            if err:
+                self._json(400, {"error": err})
+                return
+            try:
+                schedule.set(checked, self.claims["sub"])
+            except OSError as e:
+                self._json(500, {"error": f"cannot save schedule: {e}"})
+                return
+            print(f"{datetime.datetime.now():%H:%M:%S} schedule saved by {self.claims['sub']} "
+                  f"(enabled: {checked['enabled']})", file=sys.stderr)
+            controller.wake.set()  # apply it now
+            time.sleep(0.2)  # usually lets the status below reflect the new schedule
+            self._schedule_reply()
+
+        def _override(self):
+            user = self.claims["sub"]
+            print(f"{datetime.datetime.now():%H:%M:%S} heating override by {user}", file=sys.stderr)
+            controller.request_override(user)
+            time.sleep(0.5)  # usually long enough for the send to finish
+            self._schedule_reply()
+
         def _state(self):
             with hub.lock:
                 snap = hub.snapshot()
             self._json(200, snap)
+
+        def _commands(self):
+            self._json(200, {"rows": controller.commands.get(), "holdSeconds": controller.HOLD_SECONDS})
 
         def _agg(self):
             tier = urllib.parse.parse_qs(self.query).get("tier", [""])[0]
@@ -1017,6 +1410,11 @@ def main():
     ap.add_argument("--token-hours", type=float, default=12, help="token lifetime (default: 12)")
     ap.add_argument("--session-days", type=float, default=30,
                     help="longest a login can be kept alive by refreshing (default: 30)")
+    ap.add_argument("--schedule", help="heating schedule file (default: schedule.json next to the CSV)")
+    ap.add_argument("--flow-temp", type=float, default=75,
+                    help="heating flow temperature sent with each SetMode, °C (default: 75)")
+    ap.add_argument("--hwc-temp", type=float, default=52.5,
+                    help="hot water temperature sent with each SetMode, °C (default: 52.5)")
     args = ap.parse_args()
     changes = args.changes or os.path.splitext(args.csv)[0] + ".changes.log"
     host, _, port = args.ebusd.rpartition(":")
@@ -1027,7 +1425,8 @@ def main():
     base = os.path.splitext(args.csv)[0]
     aggs = [Aggregator(name, ms, keep, f"{base}.{name}.csv") for name, ms, keep in TIERS]
     for path, header, row_ok in [(args.csv, ["time"] + list(VALUES), logger_row_ok)] + \
-            [(a.path, a.header(), summary_row_ok) for a in aggs]:
+            [(a.path, a.header(), summary_row_ok) for a in aggs] + \
+            [(f"{base}.commands.csv", CommandLog.HEADER, summary_row_ok)]:
         t0 = time.monotonic()
         result = repair_csv(path, header, row_ok)
         if result:
@@ -1050,8 +1449,13 @@ def main():
         n = backfill(missing, args.csv, writer)
         print(f"read {n} samples in {time.monotonic() - t0:.0f} s; "
               + ", ".join(f"{len(a.rows)} {a.name} summaries" for a in missing), file=sys.stderr)
+    schedule = Schedule(args.schedule or os.path.join(os.path.dirname(os.path.abspath(args.csv)), "schedule.json"))
+    commands = CommandLog(f"{base}.commands.csv", hub, writer)
+    print(f"loaded {commands.load()} boiler instructions from {commands.path}", file=sys.stderr)
+    controller = HeatingController(schedule, hub, commands, host, int(port), args.flow_temp, args.hwc_temp)
     writer.start()
-    serve(hub, auth, args.bind, args.port)
+    controller.start()
+    serve(hub, auth, controller, args.bind, args.port)
     print(f"web UI on port {args.port}; logging to {args.csv} and {changes} "
           f"every {args.flush_seconds:g} s", file=sys.stderr)
 
@@ -1120,12 +1524,12 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 
 .bar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .bar select { background: var(--bg); color: var(--text); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font: inherit; }
-#charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 14px 20px; }
-.chart.wide { grid-column: 1 / -1; }
+#charts { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .chead { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; color: var(--text2); font-size: 13px; }
 .ctitle { color: var(--text); font-weight: 600; }
 .legend { display: inline-flex; align-items: center; gap: 5px; }
 .legend i { width: 12px; height: 2px; border-radius: 1px; }
+.legend i.dot { width: 9px; height: 9px; border-radius: 50%; }
 .chart svg { width: 100%; display: block; cursor: crosshair; }
 .chart .gridl { stroke: var(--grid); stroke-width: 1; }
 .chart .base { stroke: var(--axis); stroke-width: 1; }
@@ -1137,6 +1541,31 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
 #logout { background: var(--bg); color: var(--text2); border: 1px solid var(--axis); border-radius: 6px;
           padding: 2px 10px; font: inherit; cursor: pointer; }
 #logout:hover { color: var(--text); }
+.btn { background: var(--bg); color: var(--text2); border: 1px solid var(--axis); border-radius: 6px;
+       padding: 3px 10px; font: inherit; cursor: pointer; }
+.btn:hover:not(:disabled) { color: var(--text); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn.primary { background: var(--s1); border-color: var(--s1); color: #fff; }
+.btn.small { padding: 0 7px; font-size: 12px; }
+.err { color: var(--bad); }
+.cmd-state { padding: 0 6px; border-radius: 4px; }
+.cmd-state.on { background: var(--on); color: #111; }
+.cmd-state.off { background: var(--track); color: var(--text); }
+.srow { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; padding: 3px 0; }
+.srow .day { color: var(--text2); }
+.srow .day.today { color: var(--text); font-weight: 600; }
+.strip { position: relative; height: 14px; background: var(--track); border-radius: 3px; }
+.strip span { position: absolute; top: 0; bottom: 0; background: var(--on); border-radius: 2px; min-width: 2px; }
+.strip i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); }
+.hours { position: relative; height: 14px; font-size: 11px; color: var(--muted); }
+.hours span { position: absolute; transform: translateX(-50%); }
+.hours span:first-child { transform: none; }
+.hours span:last-child { transform: translateX(-100%); }
+.eday { display: grid; grid-template-columns: 44px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid #252b33; }
+.eday .periods { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.period { display: inline-flex; gap: 4px; align-items: center; }
+.period input { background: var(--bg); color: var(--text); border: 1px solid var(--axis); border-radius: 4px;
+                padding: 1px 4px; font: inherit; color-scheme: dark; }
 .chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart .lane { fill: var(--track); }
 .chart .run { fill: var(--on); }
@@ -1166,6 +1595,8 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
     <span class="lamp" id="l-HwcDemand"><i></i>HW demand (d.22)</span>
     <span class="kv">Valve position (d.35) <b data-v="PositionValveSet">—</b></span>
     <span class="kv">Error <b data-v="Currenterror">—</b></span>
+    <span class="kv" id="cmd" title="last SetMode instruction the boiler accepted">Last instruction <b class="cmd-state" id="cmd-state">—</b> <b id="cmd-when"></b> <span class="err" id="cmd-fail"></span></span>
+    <span class="kv" id="cmd-next-item" title="next SetMode instruction the app will send">Next instruction <b class="cmd-state" id="cmd-next">—</b> <b id="cmd-next-when"></b></span>
   </section>
 
   <section class="card" id="gauges"></section>
@@ -1178,6 +1609,30 @@ h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
     <span class="kv">Last update <b id="age">—</b></span>
     <span class="kv" id="who"></span>
     <button id="logout" type="button">Log out</button>
+  </section>
+
+  <section class="card" id="sched">
+    <div class="bar">
+      <h2>Heating schedule</h2>
+      <label class="kv" title="change it with Edit"><input type="checkbox" id="sched-on" disabled> enabled</label>
+      <button id="sched-edit" class="btn" type="button" hidden>Edit</button>
+      <button id="override" class="btn" type="button" hidden
+        title="send one 'heating on' now, whatever the schedule says; the schedule takes over again after 14 minutes">Heating ON for 14 min</button>
+      <span class="kv" id="override-info"></span>
+    </div>
+    <div id="sched-view"></div>
+    <form id="sched-form" hidden>
+      <label class="kv"><input type="checkbox" id="sched-enabled">
+        Schedule enabled (when disabled, the boiler follows its own controls)</label>
+      <div id="sched-days"></div>
+      <div class="bar">
+        <button class="btn primary" type="submit">Save</button>
+        <button class="btn" type="button" id="sched-cancel">Cancel</button>
+        <span class="err" id="sched-err" role="alert"></span>
+      </div>
+    </form>
+    <div class="note">Heating runs only while the boiler's own timer is also on; the schedule can switch it off,
+      not on. Times are 24-hour HH:MM: 00:00 is the start of the day and 24:00 the end.</div>
   </section>
 
   <section class="card">
@@ -1218,7 +1673,6 @@ const stateText = s => s == null ? "—" : `S.${s}  ${STATES[Number(s)] || ""}`;
 // (zero at 12 o'clock, negative values to the left).
 const GAUGES = [
   ["FlowTemp", "Flow (d.40)", "°C", 0, 90, 1],
-  ["rise", "Flow rise", "°C/s", -10, 10, 1],
   ["ReturnTemp", "Return (d.41)", "°C", 0, 90, 1],
   ["HwcTemp", "Hot water", "°C", 0, 70, 1],
   ["StorageTemp", "Storage", "°C", 0, 70, 1],
@@ -1300,9 +1754,11 @@ function applyValues(values, rise) {
 // ---------------------------------------------------------------- charts
 // One chart per measure (no shared y-scales); every chart shares the time axis and crosshair.
 const CHARTS = [
-  { title: "Temperatures", unit: "°C", dp: 1, minSpan: 4, wide: true,
+  { title: "Temperatures", unit: "°C", dp: 1, minSpan: 4,
     series: [["FlowTemp", "Flow (d.40)", "var(--s1)"], ["ReturnTemp", "Return (d.41)", "var(--s2)"], ["HwcTemp", "Hot water", "var(--s3)"]] },
-  { title: "Burner & demand (gas valve d.30, HW demand d.22)", wide: true,
+  { title: "Boiler instructions (SetMode)", commands: true,
+    legend: [["heating allowed (on)", "var(--on)"], ["heating blocked (off)", "var(--s1)"], ["send failed", "var(--bad)"], ["override", "var(--on)", "dot"]] },
+  { title: "Burner & demand (gas valve d.30, HW demand d.22)",
     strips: [["Flame", "Flame"], ["Gasvalve", "Gas valve"], ["HwcDemand", "HW demand"]] },
   { title: "Flow rise", unit: "°C/s", dp: 1, minSpan: 2, zero: true, series: [["rise", "Flow rise", "var(--s1)"]] },
   { title: "Fan", d: 34, unit: "rpm", dp: 0, minSpan: 500, series: [["FanSpeed", "Fan", "var(--s1)"]] },
@@ -1389,25 +1845,27 @@ function windowLabel(m) {
 const chartsEl = document.getElementById("charts");
 const charts = CHARTS.map((c, n) => {
   const card = document.createElement("div");
-  card.className = "chart" + (c.wide ? " wide" : "");
+  card.className = "chart";
   const head = document.createElement("div");
   head.className = "chead";
   const title = document.createElement("span");
   title.className = "ctitle";
   title.textContent = c.title + (c.unit ? ` (${c.unit})` : "") + (c.d ? ` (d.${c.d})` : "");
   head.append(title);
-  if (c.series && c.series.length > 1) {
-    for (const [, label, col] of c.series) {
+  const legend = c.legend || (c.series && c.series.length > 1 ? c.series.map(([, label, col]) => [label, col]) : []);
+  {
+    for (const [label, col, shape] of legend) {
       const item = document.createElement("span");
       item.className = "legend";
       const sw = document.createElement("i");
+      if (shape) sw.className = shape;
       sw.style.background = col;
       item.append(sw, document.createTextNode(label));
       head.append(item);
     }
   }
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  const height = c.strips ? MT + c.strips.length * ROW_H + MB : LINE_H;
+  const height = c.strips ? MT + c.strips.length * ROW_H + MB : c.commands ? MT + 2 * ROW_H + MB : LINE_H;
   svg.setAttribute("height", height);
   card.append(head, svg);
   chartsEl.append(card);
@@ -1448,12 +1906,12 @@ function tickLabel(t, step, span) {
   return clock(t, step < 60e3);
 }
 
-function timeAxis(x, t0, t1, W, H) {
+function timeAxis(x, t0, t1, W, H, baseline = true) {  // lane charts skip the baseline: it looks like another lane
   const steps = [5e3, 10e3, 15e3, 30e3, 60e3, 120e3, 300e3, 600e3, 900e3, 1800e3, 3600e3,
                  7200e3, 10800e3, 21600e3, 43200e3, 86400e3, 172800e3, 604800e3];
   const step = steps.find(s => s >= (t1 - t0) / 6) || 604800e3;
   const off = -new Date(t1).getTimezoneOffset() * 60000;  // put hour/day ticks on local time
-  let out = `<line class="base" x1="${ML}" x2="${W - MR}" y1="${H - MB}" y2="${H - MB}"/>`;
+  let out = baseline ? `<line class="base" x1="${ML}" x2="${W - MR}" y1="${H - MB}" y2="${H - MB}"/>` : "";
   for (let t = Math.ceil((t0 + off) / step) * step - off; t <= t1; t += step) {
     const px = x(t).toFixed(1);
     out += `<line class="gridl" x1="${px}" x2="${px}" y1="${MT}" y2="${H - MB}"/>` +
@@ -1585,7 +2043,7 @@ function drawLines(ch, s, t0, t1) {
 
 function drawStrips(ch, s, t0, t1) {
   const { c } = ch, { W, H, x, clip } = frame(ch, t0, t1);
-  let out = clip + timeAxis(x, t0, t1, W, H);
+  let out = clip + timeAxis(x, t0, t1, W, H, false);
   c.strips.forEach(([k, label], n) => {
     const top = MT + n * ROW_H;
     out += `<text class="ylab" x="${ML - 6}" y="${top + 13}" text-anchor="end">${label}</text>` +
@@ -1617,13 +2075,110 @@ function drawStrips(ch, s, t0, t1) {
   return out + crosshair(x, H);
 }
 
+// ---------------------------------------------------------------- boiler instructions chart
+// Top lane: what the boiler was told, held from each accepted instruction until the next one,
+// or until the boiler's own timeout (holdSeconds) if nothing followed. Bottom lane: every send,
+// one tick each (red if ebusd refused it or could not be reached); omitted beyond 2 days.
+let commands = [], holdMs = 900000;
+
+function loadCommands() {
+  api("/api/commands").then(r => r.ok ? r.json() : null).then(d => {
+    if (!d) return;
+    commands = d.rows;
+    holdMs = d.holdSeconds * 1000;
+    scheduleDraw();
+  }).catch(() => {});
+}
+
+function addCommand(row) {
+  if (commands.length && row[0] <= commands[commands.length - 1][0]) return;
+  commands.push(row);
+  const cutoff = row[0] - 31 * 86400e3;
+  while (commands.length && commands[0][0] < cutoff) commands.shift();
+  scheduleDraw();
+}
+
+// accepted instructions as [from, to, state] runs
+function commandRuns(t1) {
+  const ok = commands.filter(c => c[2] === 1), runs = [];
+  ok.forEach((c, i) => {
+    const end = Math.min(i + 1 < ok.length ? ok[i + 1][0] : Infinity, c[0] + holdMs, t1);
+    const last = runs[runs.length - 1];
+    if (last && last[2] === c[1] && last[1] >= c[0]) last[1] = end;
+    else runs.push([c[0], end, c[1]]);
+  });
+  return runs;
+}
+
+function drawCommands(ch, t0, t1) {
+  const { W, H, x, clip } = frame(ch, t0, t1);
+  const colour = st => st === "on" ? "var(--on)" : "var(--s1)";
+  let out = clip + timeAxis(x, t0, t1, W, H, false);
+  const lane = (n, label) => {
+    const top = MT + n * ROW_H;
+    out += `<text class="ylab" x="${ML - 6}" y="${top + 13}" text-anchor="end">${label}</text>` +
+           `<rect class="lane" x="${ML}" y="${top + 3}" width="${Math.max(0, W - ML - MR)}" height="12" rx="2"/>`;
+    return top;
+  };
+  let top = lane(0, "Boiler told");
+  for (const [a, b, st] of commandRuns(t1)) {
+    if (b < t0) continue;
+    const x0 = x(Math.max(a, t0)), w = Math.max(2, x(b) - x0);
+    out += `<rect clip-path="url(#clip${ch.id})" fill="${colour(st)}" x="${x0.toFixed(1)}" y="${top + 3}" ` +
+           `width="${w.toFixed(1)}" height="12" rx="2"/>`;
+  }
+  top = lane(1, "Sends");
+  if (t1 - t0 <= 2 * 86400e3) {
+    for (const [ms, st, ok, source] of commands) {
+      if (ms < t0) continue;
+      if (ok && (source || "").startsWith("override:")) {  // overrides: a filled circle, ringed so it stands clear
+        out += `<circle clip-path="url(#clip${ch.id})" fill="var(--on)" stroke="var(--card)" stroke-width="1.5" ` +
+               `cx="${x(ms).toFixed(1)}" cy="${top + 9}" r="5.5"/>`;
+        continue;
+      }
+      out += `<rect clip-path="url(#clip${ch.id})" fill="${ok ? colour(st) : "var(--bad)"}" ` +
+             `x="${(x(ms) - 1).toFixed(1)}" y="${top + (ok ? 3 : 0)}" width="2" height="${ok ? 12 : 18}"/>`;
+    }
+  } else {
+    out += `<text class="ylab" x="${ML + 6}" y="${top + 13}">individual sends shown for windows up to 2 days</text>`;
+  }
+  return out + crosshair(x, H);
+}
+
+function sourceText(source) {
+  return source && source.startsWith("override:") ? ` (override by ${source.slice(9)})` : "";
+}
+
+function fillCommandTip() {
+  const t = hoverT, rows = [];
+  const add = (text, col, cls) => {
+    const d = document.createElement("div");
+    if (cls) d.className = cls;
+    if (col) { const sw = document.createElement("i"); sw.style.background = col; d.append(sw); }
+    d.append(document.createTextNode(text));
+    rows.push(d);
+  };
+  add(clock(t, true), null, "tt");
+  const run = commandRuns(Date.now() + skew).find(([a, b]) => a <= t && t < b);
+  add(run ? `boiler told: heating ${run[2] === "on" ? "allowed (on)" : "blocked (off)"}`
+          : "boiler told: nothing (own controls)", run ? (run[2] === "on" ? "var(--on)" : "var(--s1)") : null);
+  let prev = null;
+  for (const c of commands) { if (c[0] > t) break; prev = c; }
+  if (prev) add(`last send ${clock(prev[0], true)}: ${prev[1]}${sourceText(prev[3])}${prev[2] ? "" : " (failed)"}`,
+                prev[2] ? null : "var(--bad)");
+  tip.replaceChildren(...rows);
+}
+
 const view = () => { const t1 = Date.now() + skew; return [t1 - windowMin * 60000, t1]; };
 
 function draw() {
   const [t0, t1] = view();
   src = currentSource();
   const s = { ...src, rows: src.rows.slice(Math.max(0, lowerBound(src, t0) - 1)) };
-  for (const ch of charts) ch.svg.innerHTML = ch.c.strips ? drawStrips(ch, s, t0, t1) : drawLines(ch, s, t0, t1);
+  for (const ch of charts) {
+    ch.svg.innerHTML = ch.c.commands ? drawCommands(ch, t0, t1)
+      : ch.c.strips ? drawStrips(ch, s, t0, t1) : drawLines(ch, s, t0, t1);
+  }
   const tier = src.bucketMs ? tiers.find(t => t.bucketMs === src.bucketMs) : null;
   document.getElementById("res").textContent = src.loading ? "loading…"
     : tier ? `${tier.name} averages · shaded band = min–max` : "every reading";
@@ -1642,7 +2197,7 @@ const tip = document.getElementById("tip");
 
 function onHover(e, ch) {
   const r = ch.svg.getBoundingClientRect(), px = e.clientX - r.left;
-  if (px < ML || px > r.width - MR || !src || !src.rows.length) {
+  if (px < ML || px > r.width - MR || (!ch.c.commands && (!src || !src.rows.length))) {
     hoverT = null; tip.hidden = true; scheduleDraw(); return;
   }
   const [t0, t1] = view();
@@ -1657,6 +2212,7 @@ function onHover(e, ch) {
 }
 
 function fillTip() {
+  if (hoverChart.c.commands) { fillCommandTip(); return; }
   if (!src || !src.rows.length) return;
   const s = src, r = nearest(s, hoverT), c = hoverChart.c, agg = s.bucketMs > 0;
   const fmt = v => v == null ? "—" : v.toFixed(c.dp);
@@ -1713,6 +2269,237 @@ winSel.addEventListener("change", () => {
   localStorage.setItem("boilerWindow", windowMin);
   scheduleDraw();
 });
+
+// ---------------------------------------------------------------- heating schedule
+// Everyone sees it; admins get an editor. The server checks the role again on save.
+const DAY_LABELS = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+const JS_DAY = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+let sched = null, editing = false, control = null;
+
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+const minutes = t => +t.slice(0, 2) * 60 + +t.slice(3);
+
+function loadSchedule() {
+  if (editing) return;
+  api("/api/schedule").then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || editing) return;
+    sched = d;
+    if (d.status) control = d.status;
+    renderSchedule();
+  }).catch(() => {});
+}
+
+function renderSchedule() {
+  const view = document.getElementById("sched-view");
+  document.getElementById("sched-edit").hidden = editing || !sched || (getAuth() || {}).role !== "admin";
+  showEnabled();
+  showControl(control);
+  if (!sched) return;
+  const now = new Date(), today = JS_DAY[now.getDay()], nowMin = now.getHours() * 60 + now.getMinutes();
+  const rows = [];
+  const hours = el("div", "hours");
+  for (const h of [0, 3, 6, 9, 12, 15, 18, 21, 24]) {
+    const s = el("span", null, String(h).padStart(2, "0"));
+    s.style.left = (h / 24 * 100) + "%";
+    hours.append(s);
+  }
+  const head = el("div", "srow");
+  head.append(el("span"), hours);
+  rows.push(head);
+  for (const day of sched.dayOrder) {
+    const row = el("div", "srow");
+    const strip = el("div", "strip");
+    for (const [on, off] of sched.days[day]) {
+      const s = el("span");
+      s.style.left = (minutes(on) / 1440 * 100) + "%";
+      s.style.width = ((minutes(off) - minutes(on)) / 1440 * 100) + "%";
+      s.title = `${on}–${off}`;
+      strip.append(s);
+    }
+    if (day === today) {
+      const mark = el("i");
+      mark.style.left = (nowMin / 1440 * 100) + "%";
+      mark.title = "now";
+      strip.append(mark);
+    }
+    row.append(el("span", "day" + (day === today ? " today" : ""), DAY_LABELS[day]), strip);
+    rows.push(row);
+  }
+  view.replaceChildren(...rows);
+  view.style.opacity = sched.enabled ? "" : "0.45";
+}
+
+// "Last instruction" in the status bar: what the boiler last accepted, how long ago, and any later failure
+function ago(iso) {
+  const secs = Math.max(0, (Date.now() + skew - new Date(iso).getTime()) / 1000);
+  return secs < 60 ? `${Math.round(secs)} s ago` : secs < 3600 ? `${Math.floor(secs / 60)} min ago`
+    : `${Math.floor(secs / 3600)} h ${Math.floor(secs % 3600 / 60)} min ago`;
+}
+
+function showInstruction() {
+  const state = document.getElementById("cmd-state"), when = document.getElementById("cmd-when"),
+        fail = document.getElementById("cmd-fail"), ok = control && control.lastOk, last = control && control.lastSend;
+  state.className = "cmd-state" + (ok ? " " + ok.state : "");
+  state.textContent = ok ? `heating ${ok.state.toUpperCase()}`
+    : !control ? "unknown (no status from the app yet)"
+    : !control.enabled ? "none: the heating schedule is disabled" : "none sent yet";
+  when.textContent = ok ? `at ${ok.time.slice(11, 19)} (${ago(ok.time)})${sourceText(ok.source)}` : "";
+  fail.textContent = last && !last.ok ? `· ${last.state} failed at ${last.time.slice(11, 19)}: ${last.result}` : "";
+
+  const next = document.getElementById("cmd-next"), nextWhen = document.getElementById("cmd-next-when");
+  const due = control && control.nextSend;
+  next.className = "cmd-state" + (due ? " " + control.nextState : "");
+  next.textContent = due ? `heating ${control.nextState.toUpperCase()}`
+    : !control ? "unknown" : !control.enabled ? "none: the heating schedule is disabled" : "—";
+  nextWhen.textContent = due ? `at ${control.nextSend.slice(11, 19)} (${until(control.nextSend)})` : "";
+}
+
+function until(iso) {
+  const secs = Math.max(0, (new Date(iso).getTime() - Date.now() - skew) / 1000);
+  return secs < 60 ? `in ${Math.round(secs)} s` : `in ${Math.floor(secs / 60)} min ${Math.round(secs % 60)} s`;
+}
+
+function showControl(c) {
+  control = c;
+  showEnabled();
+  showInstruction();
+  showOverride();
+}
+
+// Override button: users and admins (the server checks the role too)
+function showOverride() {
+  const role = (getAuth() || {}).role, btn = document.getElementById("override");
+  const info = document.getElementById("override-info"), o = control && control.override;
+  btn.hidden = role !== "user" && role !== "admin";
+  btn.textContent = o ? "Restart override" : "Heating ON for 14 min";
+  info.textContent = o ? `override by ${o.by}: heating ON until ${o.until.slice(11, 19)} (${until(o.until)})`
+    + (o.sent ? "" : " · not sent yet, retrying") : "";
+  info.classList.toggle("err", !!(o && !o.sent));
+}
+
+document.getElementById("override").addEventListener("click", () => {
+  const btn = document.getElementById("override"), info = document.getElementById("override-info");
+  btn.disabled = true;
+  info.textContent = "sending…";
+  api("/api/override", { method: "POST" }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `override failed (${r.status})`);
+    if (d.status) showControl(d.status);
+  }).catch(ex => { info.textContent = ex.message; info.classList.add("err"); })
+    .finally(() => { btn.disabled = false; });
+});
+
+function showEnabled() {
+  const enabled = control ? control.enabled : sched ? sched.enabled : null;
+  const box = document.getElementById("sched-on");
+  box.checked = !!enabled;
+  box.indeterminate = enabled == null;
+}
+
+function periodRow(on = "", off = "") {
+  const p = el("span", "period");
+  const a = el("input"), b = el("input"), x = el("button", "btn small", "✕");
+  // text, not type=time: time inputs can't hold 24:00, the end of the day
+  for (const [input, value, pattern] of [[a, on, "([01]\\d|2[0-3]):[0-5]\\d"],
+                                         [b, off, "([01]\\d|2[0-3]):[0-5]\\d|24:00"]]) {
+    input.type = "text";
+    input.required = true;
+    input.value = value;
+    input.pattern = pattern;
+    input.placeholder = "HH:MM";
+    input.maxLength = 5;
+    input.size = 5;
+    input.inputMode = "numeric";
+  }
+  a.title = "on time, 00:00–23:59";
+  b.title = "off time, 00:01–24:00 (24:00 = end of the day)";
+  a.setAttribute("aria-label", "on");
+  b.setAttribute("aria-label", "off");
+  x.type = "button";
+  x.title = "remove";
+  x.addEventListener("click", () => { const box = p.parentElement; p.remove(); updateAdd(box); });
+  p.append(a, el("span", "note", "–"), b, x);
+  return p;
+}
+
+function updateAdd(box) {
+  box.querySelector(".add").disabled = box.querySelectorAll(".period").length >= sched.maxPeriods;
+}
+
+function readDay(box) {
+  return [...box.querySelectorAll(".period")].map(p => {
+    const [a, b] = p.querySelectorAll("input");
+    return [a.value.trim(), b.value.trim()];
+  });
+}
+
+function openEditor() {
+  editing = true;
+  document.getElementById("sched-enabled").checked = sched.enabled;
+  const days = sched.dayOrder.map(day => {
+    const row = el("div", "eday"), box = el("div", "periods");
+    box.dataset.day = day;
+    for (const [on, off] of sched.days[day]) box.append(periodRow(on, off));
+    const add = el("button", "btn small add", "+ add"), copy = el("button", "btn small", "copy to all days");
+    add.type = copy.type = "button";
+    add.addEventListener("click", () => { add.before(periodRow()); updateAdd(box); });
+    copy.addEventListener("click", () => {
+      const periods = readDay(box);
+      for (const other of document.querySelectorAll("#sched-days .periods")) {
+        if (other === box) continue;
+        other.querySelectorAll(".period").forEach(p => p.remove());
+        const otherAdd = other.querySelector(".add");
+        for (const [on, off] of periods) otherAdd.before(periodRow(on, off));
+        updateAdd(other);
+      }
+    });
+    box.append(add, copy);
+    row.append(el("span", "day", DAY_LABELS[day]), box);
+    updateAdd(box);
+    return row;
+  });
+  document.getElementById("sched-days").replaceChildren(...days);
+  document.getElementById("sched-err").textContent = "";
+  document.getElementById("sched-view").hidden = true;
+  document.getElementById("sched-form").hidden = false;
+  renderSchedule();
+}
+
+function closeEditor() {
+  editing = false;
+  document.getElementById("sched-form").hidden = true;
+  document.getElementById("sched-view").hidden = false;
+  renderSchedule();
+}
+
+document.getElementById("sched-edit").addEventListener("click", openEditor);
+document.getElementById("sched-cancel").addEventListener("click", closeEditor);
+document.getElementById("sched-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const days = {};
+  for (const box of document.querySelectorAll("#sched-days .periods")) days[box.dataset.day] = readDay(box);
+  const err = document.getElementById("sched-err");
+  err.textContent = "saving…";
+  api("/api/schedule", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: document.getElementById("sched-enabled").checked, days }),
+  }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `save failed (${r.status})`);
+    sched = d;
+    if (d.status) control = d.status;
+    closeEditor();
+  }).catch(ex => { err.textContent = ex.message; });
+});
+
+loadSchedule();
+setInterval(loadSchedule, 60000);  // picks up edits made elsewhere
+setInterval(() => { if (!editing) renderSchedule(); }, 60000);  // move the "now" mark
 
 // ---------------------------------------------------------------- change list
 const log = document.getElementById("log");
@@ -1829,6 +2616,8 @@ function onMessage(ev) {
   const m = JSON.parse(ev.data);
   if (m.type === "ping") return;
   if (m.type === "change") { addChange(m); return; }
+  if (m.type === "control") { showControl(m.control); return; }
+  if (m.type === "command") { addCommand(m.row); return; }
   if (m.type === "bucket") {
     const tier = tiers.find(t => t.name === m.tier);
     if (tier) { addBucket(tier, m.row); scheduleDraw(); }
@@ -1843,6 +2632,8 @@ function onMessage(ev) {
     samples = m.history;
     historyMinutes = m.historyMinutes;
     tiers = (m.tiers || []).map(t => ({ ...t, rows: null, loading: false, buffer: [], retryAt: 0 }));
+    showControl(m.control);
+    loadCommands();
     buildWindows();
   } else if (m.sample) {
     samples.push(m.sample);
@@ -1870,6 +2661,8 @@ function showAge() {
 setInterval(() => {
   checkConnection(false);
   showAge();
+  showInstruction();
+  showOverride();
   scheduleDraw();  // keep the charts scrolling between updates
 }, 1000);
 addEventListener("resize", scheduleDraw);
