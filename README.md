@@ -90,4 +90,8 @@ Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
 - Raspberry Pi Zero with USB hub (in the data port) and wifi dongle
 - [eBUS Adapter Shield C6](https://adapter.ebusd.eu/v5-c6/index.en.html)
 
-![Pi Zero plus eBUS C6](pizero.png)
+[![Pi Zero plus eBUS C6](images/pizero-thumbnail.png)](images/pizero.png)
+
+## Screenshot
+
+[![screenshot](images/screenshot-thumbnail.png)](images/screenshot.png)
