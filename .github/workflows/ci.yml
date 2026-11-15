@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]*', '[0-9]*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-sh:
+    name: Lint shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ShellCheck
+        run: make lint-sh
+
+  lint-py-yaml:
+    name: Lint Python and YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install linters
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: make lint-py
+
+      - name: yamllint
+        run: make lint-yaml
+
+  lint-web:
+    name: Lint JS, CSS and HTML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install linters
+        run: npm ci
+
+      - name: ESLint, Stylelint and HTMLHint
+        run: make lint-web
+
+  lint-deb:
+    name: Lint packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build the deb and verify the systemd service
+        run: make lint-deb VERSION=0.0.0 MAINTAINER='CI <ci@example.invalid>'
+
+  deb:
+    name: Build deb
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [lint-sh, lint-py-yaml, lint-web, lint-deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build the deb
+        id: build
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9][A-Za-z0-9.+~-]*$ ]]; then
+            echo "tag $GITHUB_REF_NAME is not a Debian version (e.g. v1.2.3 or 1.2.3)"
+            exit 1
+          fi
+          make deb VERSION="$version" MAINTAINER="$(git log -1 --format='%an <%ae>')"
+          echo "deb=build/vaillant-boiler-ui_${version}_all.deb" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vaillant-boiler-ui-${{ github.ref_name }}-deb
+          path: ${{ steps.build.outputs.deb }}
+          if-no-files-found: error
