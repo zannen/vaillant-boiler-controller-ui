@@ -34,8 +34,12 @@ make deb VERSION=0.2.0
 scp build/vaillant-boiler-ui_*_all.deb "$SERVER_USER@$SERVER_ADDR:"
 ```
 
-Or push a tag such as `v0.2.0`: CI builds the package for that version and keeps it as a
-workflow artifact (`vaillant-boiler-ui-v0.2.0-deb` on the run's page).
+Or push a tag such as `v0.2.0`: CI builds the package for that version and attaches it to a
+GitHub release, so the Pi can fetch it directly:
+
+```sh
+wget https://github.com/zannen/vaillant-boiler-controller-ui/releases/download/v0.2.0/vaillant-boiler-ui_0.2.0_all.deb
+```
 
 On the Pi:
 
