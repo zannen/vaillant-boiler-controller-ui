@@ -4,7 +4,7 @@ function getAuth() {
   try {
     const a = JSON.parse(localStorage.getItem(AUTH_KEY));
     return a && a.token && Date.now() < a.expiresAt ? a : null;
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 function toLogin() {
   localStorage.removeItem(AUTH_KEY);
