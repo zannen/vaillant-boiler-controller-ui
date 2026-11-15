@@ -25,3 +25,17 @@ lint-deb: deb
 	sed 's|/usr/bin/$(PKG)|$(CURDIR)/$(DEBROOT)/usr/bin/$(PKG)|' packaging/deb/$(PKG).service \
 		>build/verify/$(PKG).service
 	systemd-analyze verify build/verify/$(PKG).service
+
+SH_FILES := make_deb.sh packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm
+
+.PHONY: lint lint-sh lint-yaml lint-py
+lint: lint-sh lint-yaml lint-py
+
+lint-sh:
+	shellcheck $(SH_FILES)
+
+lint-yaml:
+	yamllint --strict .
+
+lint-py:
+	ruff check app
