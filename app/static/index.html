@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boiler</title>
+<script src="/auth.js"></script>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <section class="card" id="status">
+    <div id="state">—</div>
+    <span class="lamp" id="l-Flame"><i></i>Flame</span>
+    <span class="lamp" id="l-Gasvalve"><i></i>Gas valve (d.30)</span>
+    <span class="lamp" id="l-Ignitor"><i></i>Ignitor</span>
+    <span class="lamp" id="l-HwcDemand"><i></i>HW demand (d.22)</span>
+    <span class="kv">Valve position (d.35) <b data-v="PositionValveSet">—</b></span>
+    <span class="kv">Error <b data-v="Currenterror">—</b></span>
+    <span class="kv" id="cmd" title="last SetMode instruction the boiler accepted">Last instruction <b class="cmd-state" id="cmd-state">—</b> <b id="cmd-when"></b> <span class="err" id="cmd-fail"></span></span>
+    <span class="kv" id="cmd-next-item" title="next SetMode instruction the app will send">Next instruction <b class="cmd-state" id="cmd-next">—</b> <b id="cmd-next-when"></b></span>
+  </section>
+
+  <section class="card" id="gauges"></section>
+
+  <section class="card" id="info">
+    <span class="kv">Temp limiter cut-outs (d.60) <b data-v="DeactivationsTemplimiter">—</b></span>
+    <span class="kv">IFC cut-outs <b data-v="DeactivationsIFC">—</b></span>
+    <span class="kv">Start attempts <b data-v="CounterStartattempts1">—</b></span>
+    <span class="kv">Ionisation (d.44) <b data-v="IonisationVoltageLevel">—</b></span>
+    <span class="kv">Last update <b id="age">—</b></span>
+    <span class="kv" id="who"></span>
+    <button id="logout" type="button">Log out</button>
+  </section>
+
+  <section class="card" id="sched">
+    <div class="bar">
+      <h2>Heating schedule</h2>
+      <label class="kv" title="change it with Edit"><input type="checkbox" id="sched-on" disabled> enabled</label>
+      <button id="sched-edit" class="btn" type="button" hidden>Edit</button>
+      <button id="override" class="btn" type="button" hidden
+        title="send one 'heating on' now, whatever the schedule says; the schedule takes over again after 14 minutes">Heating ON for 14 min</button>
+      <span class="kv" id="override-info"></span>
+    </div>
+    <div id="sched-view"></div>
+    <form id="sched-form" hidden>
+      <label class="kv"><input type="checkbox" id="sched-enabled">
+        Schedule enabled (when disabled, the boiler follows its own controls)</label>
+      <div id="sched-days"></div>
+      <div class="bar">
+        <button class="btn primary" type="submit">Save</button>
+        <button class="btn" type="button" id="sched-cancel">Cancel</button>
+        <span class="err" id="sched-err" role="alert"></span>
+      </div>
+    </form>
+    <div class="note">Heating runs only while the boiler's own timer is also on; the schedule can switch it off,
+      not on. Times are 24-hour HH:MM: 00:00 is the start of the day and 24:00 the end.</div>
+  </section>
+
+  <section class="card">
+    <div class="bar">
+      <h2>History</h2>
+      <label class="kv">Window <select id="win"></select></label>
+      <span class="note" id="res"></span>
+    </div>
+    <div id="charts"></div>
+  </section>
+
+  <section class="card">
+    <h2>Changes</h2>
+    <ul id="log"></ul>
+  </section>
+  <div class="note">S-code descriptions are approximate (ecoTEC plus service documentation).</div>
+</main>
+<div id="tip" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
