@@ -88,3 +88,28 @@ jobs:
           name: vaillant-boiler-ui-${{ github.ref_name }}-deb
           path: ${{ steps.build.outputs.deb }}
           if-no-files-found: error
+
+  release:
+    name: Release
+    needs: deb
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: vaillant-boiler-ui-${{ github.ref_name }}-deb
+          path: dist
+
+      - name: Create the GitHub release with the deb attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # re-run of the workflow: replace the deb on the existing release
+            gh release upload "$GITHUB_REF_NAME" dist/*.deb --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "$GITHUB_REF_NAME" --generate-notes dist/*.deb
+          fi
