@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Poll ebusd for Vaillant BAI values, append them to a CSV file and serve a live web UI.
+"""Poll ebusd for Vaillant BAI values, append them to a CSV file and serve a
+live web UI.
 
-Usage: boiler-log-ui.py [CSV_PATH] --users HTPASSWD --roles ROLES [--port 8000] [--changes PATH]
-                        [--ebusd HOST:PORT] [--history-minutes 60] [--flush-seconds 30]
-                        [--secret-file PATH] [--token-hours 12] [--session-days 30]
-Then open http://<pi-address>:8000/ in a browser on the local network
-(add ?minutes=N to choose the chart window, e.g. http://<pi-address>:8000/?minutes=5).
+Usage: vaillant-boiler-ui.py [CSV_PATH] --users HTPASSWD --roles ROLES
+           [--port 8000] [--changes PATH] [--ebusd HOST:PORT]
+           [--history-minutes 60] [--flush-seconds 30] [--secret-file PATH]
+           [--token-hours 12] [--session-days 30]
+Then open http://<pi-address>:8000/ in a browser on the local network (add
+?minutes=N to choose the chart window, e.g.
+http://<pi-address>:8000/?minutes=5).
 
-Users: an htpasswd file with bcrypt hashes (htpasswd -B), plus a roles file in Apache group-file
-format, one line per role (a user in several roles gets the highest; a user in none cannot log in):
+Users: an htpasswd file with bcrypt hashes (htpasswd -B), plus a roles file in
+Apache group-file format, one line per role (a user in several roles gets the
+highest; a user in none cannot log in):
     admin: alice
     user: bob carol
     viewer: guest
@@ -40,7 +44,8 @@ try:
     import bcrypt
 except ImportError:
     sys.exit(
-        "boiler-log-ui.py needs the bcrypt module: sudo apt install python3-bcrypt"
+        "vaillant-boiler-ui.py needs the bcrypt module: "
+        "sudo apt install python3-bcrypt"
     )
 
 # name -> minimum seconds between reads (0 = every pass)
@@ -67,8 +72,8 @@ VALUES = {
 }
 
 # Numeric values only appear in the change list once they have moved this far
-# from the last listed value. Everything else (on/off, status numbers, counters,
-# error codes) is listed on every change.
+# from the last listed value. Everything else (on/off, status numbers,
+# counters, error codes) is listed on every change.
 THRESHOLDS = {
     "FlowTemp": 1.0,
     "ReturnTemp": 1.0,
@@ -101,10 +106,12 @@ SAMPLE_KEYS = [
 SWITCHES = {"Flame", "Gasvalve", "HwcDemand"}
 
 CHANGE_HISTORY = 500
-GAP_MS = 15000  # samples further apart than this are not joined (and give no rise value)
+# samples further apart than this are not joined (and give no rise value)
+GAP_MS = 15000
 
-# Long chart windows use per-bucket summaries (mean/min/max of each sample value),
-# kept in memory and appended to <csv name>.<tier>.csv: (name, bucket ms, minutes kept)
+# Long chart windows use per-bucket summaries (mean/min/max of each sample
+# value), kept in memory and appended to <csv name>.<tier>.csv:
+# (name, bucket ms, minutes kept)
 TIERS = [
     ("1min", 60_000, 2 * 1440),
     ("15min", 15 * 60_000, 31 * 1440),
@@ -113,6 +120,11 @@ TIERS = [
 
 def stamp():
     return datetime.datetime.now().isoformat(timespec="milliseconds")
+
+
+def log(msg):
+    """Print a timestamped message to stderr."""
+    print(f"{datetime.datetime.now():%H:%M:%S} {msg}", file=sys.stderr)
 
 
 def epoch_ms():
@@ -157,7 +169,8 @@ def make_sample(ts, values, rise):
 
 
 def tail_lines(path, max_bytes):
-    """Text lines from the last max_bytes of a file, and the byte offset they start at."""
+    """Text lines from the last max_bytes of a file, and the byte offset they
+    start at."""
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         start = max(0, f.tell() - max_bytes)
@@ -171,7 +184,8 @@ def tail_lines(path, max_bytes):
 
 
 def header_before(path, offset):
-    """Columns of the last CSV header line ("time,...") before a byte offset, or None."""
+    """Columns of the last CSV header line ("time,...") before a byte offset,
+    or None."""
     block, pos, carry = 65536, offset, b""
     with open(path, "rb") as f:
         while pos > 0:
@@ -193,7 +207,8 @@ def header_before(path, offset):
 
 
 def csv_samples(lines, header=None):
-    """Chart samples from logger CSV lines; header lines (from restarts) switch the columns."""
+    """Chart samples from logger CSV lines; header lines (from restarts) switch
+    the columns."""
     prev_flow = None  # (epoch ms, FlowTemp)
     for row in csv.reader(lines):
         if not row:
@@ -221,7 +236,8 @@ def csv_samples(lines, header=None):
 
 
 def load_history(hub, csv_path):
-    """Fill the chart history from the end of the CSV file; returns the number of samples loaded."""
+    """Fill the chart history from the end of the CSV file; returns the number
+    of samples loaded."""
     if not os.path.exists(csv_path):
         return 0
     lines, start = tail_lines(csv_path, hub.history_minutes * 60 * 400)
@@ -237,7 +253,8 @@ def load_history(hub, csv_path):
 
 
 class Aggregator:
-    """Summarises chart samples into fixed time buckets: [start ms, mean, min, max of each SAMPLE_KEYS value]."""
+    """Summarises chart samples into fixed time buckets: [start ms, mean, min,
+    max of each SAMPLE_KEYS value]."""
 
     def __init__(self, name, bucket_ms, keep_minutes, path):
         self.name, self.bucket_ms, self.keep_minutes, self.path = (
@@ -269,9 +286,11 @@ class Aggregator:
         return [when, row[0]] + ["" if v is None else v for v in row[1:]]
 
     def add(self, sample):
-        """Add a chart sample; returns the finished bucket row when a bucket closes."""
+        """Add a chart sample; returns the finished bucket row when a bucket
+        closes."""
         start = sample[0] - sample[0] % self.bucket_ms
-        # ignore samples for buckets already finished (clock stepped back, or a restart mid-bucket)
+        # ignore samples for buckets already finished (clock stepped back, or a
+        # restart mid-bucket)
         if (self.start is not None and start < self.start) or (
             self.rows and start <= self.rows[-1][0]
         ):
@@ -314,7 +333,8 @@ class Aggregator:
 
 
 def load_agg(agg):
-    """Fill an aggregator from the end of its file; returns rows loaded, or None if there is no file."""
+    """Fill an aggregator from the end of its file; returns rows loaded, or
+    None if there is no file."""
     if not os.path.exists(agg.path):
         return None
     wanted = agg.keep_minutes * 60000 // agg.bucket_ms + 10
@@ -351,7 +371,8 @@ def load_agg(agg):
 
 
 def backfill(aggs, csv_path, writer):
-    """Build missing summary files from the whole logger CSV (done once). Returns samples read."""
+    """Build missing summary files from the whole logger CSV (done once).
+    Returns samples read."""
     if not os.path.exists(csv_path):
         return 0
     cutoff = epoch_ms() - max(a.keep_minutes for a in aggs) * 60000
@@ -372,9 +393,9 @@ def backfill(aggs, csv_path, writer):
 
 
 def csv_is_clean(path, header):
-    """True if the file starts with exactly this header, has no other header lines and no NUL
-    bytes, and ends with a complete line. Reads the file in large blocks, so it's quick.
-    """
+    """True if the file starts with exactly this header, has no other header
+    lines and no NUL bytes, and ends with a complete line. Reads the file in
+    large blocks, so it's quick."""
     want = ",".join(header).encode()
     with open(path, "rb") as f:
         if f.readline().rstrip(b"\r\n") != want:
@@ -394,11 +415,11 @@ def csv_is_clean(path, header):
 
 
 def repair_csv(path, header, row_ok):
-    """Clean up a CSV file written by this program, rewriting it only if needed:
-    one header line (the current columns) at the top, no NUL bytes (left by crashes or power
-    cuts), and no incomplete or unreadable rows. Rows written under an older header are
-    converted to the current columns by name. Returns a summary string, or None if nothing changed.
-    """
+    """Clean up a CSV file written by this program, rewriting it only if
+    needed: one header line (the current columns) at the top, no NUL bytes
+    (left by crashes or power cuts), and no incomplete or unreadable rows. Rows
+    written under an older header are converted to the current columns by name.
+    Returns a summary string, or None if nothing changed."""
     tmp = path + ".repair"
     if os.path.exists(tmp):
         os.remove(
@@ -457,7 +478,8 @@ def repair_csv(path, header, row_ok):
     finally:
         os.close(dirfd)
     return (
-        f"repaired {path}: kept {kept} rows, removed {max(0, headers - 1)} extra header lines, "
+        f"repaired {path}: kept {kept} rows, "
+        f"removed {max(0, headers - 1)} extra header lines, "
         f"{nuls} NUL bytes and {dropped} incomplete or unreadable rows; "
         f"converted {converted} rows from older column layouts"
     )
@@ -490,7 +512,8 @@ def needs_header(path):
 
 
 def load_changes(hub, changes_path):
-    """Fill the change list from the end of the change log; returns the number of entries loaded."""
+    """Fill the change list from the end of the change log; returns the number
+    of entries loaded."""
     if not os.path.exists(changes_path):
         return 0
     lines, _ = tail_lines(changes_path, CHANGE_HISTORY * 200)
@@ -516,7 +539,8 @@ class Ebusd:
         return self.command(f"read -f -c bai {name}")
 
     def write(self, name, value):
-        """Write a message; ebusd answers "done" or "empty" on success, "ERR: ..." on failure."""
+        """Write a message; ebusd answers "done" or "empty" on success,
+        "ERR: ..." on failure."""
         return self.command(f"write -c bai {name} {value}")
 
     def close(self):
@@ -536,7 +560,7 @@ class Ebusd:
             lines.append(line)
 
 
-# ---------------------------------------------------------------- heating schedule
+# ------------------------------------------------------------ heating schedule
 
 DAY_KEYS = [
     "mon",
@@ -551,7 +575,8 @@ MAX_PERIODS = 10  # on/off pairs per day
 
 
 def parse_hhmm(text, allow_2400=False):
-    """Minutes since midnight for "HH:MM", or None. "24:00" (end of day) only if allowed."""
+    """Minutes since midnight for "HH:MM", or None. "24:00" (end of day) only
+    if allowed."""
     if not isinstance(text, str) or len(text) != 5 or text[2] != ":":
         return None
     try:
@@ -568,7 +593,8 @@ def hhmm(minutes):
 
 
 def validate_schedule(obj):
-    """Checked, normalised copy of a schedule from the web page, or (None, error message)."""
+    """Checked, normalised copy of a schedule from the web page, or (None,
+    error message)."""
     if (
         not isinstance(obj, dict)
         or not isinstance(obj.get("enabled"), bool)
@@ -576,7 +602,8 @@ def validate_schedule(obj):
     ):
         return (
             None,
-            'expected {"enabled": true|false, "days": {"mon": [["06:30", "08:30"], ...], ...}}',
+            'expected {"enabled": true|false, '
+            '"days": {"mon": [["06:30", "08:30"], ...], ...}}',
         )
     unknown = set(obj["days"]) - set(DAY_KEYS)
     if unknown:
@@ -594,12 +621,14 @@ def validate_schedule(obj):
             if on is None or off is None:
                 return (
                     None,
-                    f"{day}: times must be HH:MM (off may be 24:00), got {p[0]!r}-{p[1]!r}",
+                    f"{day}: times must be HH:MM (off may be 24:00), "
+                    f"got {p[0]!r}-{p[1]!r}",
                 )
             if on >= off:
                 return (
                     None,
-                    f"{day}: {p[0]}-{p[1]}: on must be before off (use 24:00 for midnight)",
+                    f"{day}: {p[0]}-{p[1]}: on must be before off "
+                    "(use 24:00 for midnight)",
                 )
             spans.append((on, off))
         spans.sort()
@@ -607,7 +636,8 @@ def validate_schedule(obj):
             if b0 < a1:
                 return (
                     None,
-                    f"{day}: {hhmm(a0)}-{hhmm(a1)} overlaps {hhmm(b0)}-{hhmm(b1)}",
+                    f"{day}: {hhmm(a0)}-{hhmm(a1)} "
+                    f"overlaps {hhmm(b0)}-{hhmm(b1)}",
                 )
         days[day] = [[hhmm(a), hhmm(b)] for a, b in spans]
     return {"enabled": obj["enabled"], "days": days}, None
@@ -657,7 +687,8 @@ class Schedule:
         return self.get()
 
     def wanted(self, when):
-        """True if heating should be allowed at this (local) time, False if not, None if disabled."""
+        """True if heating should be allowed at this (local) time, False if
+        not, None if disabled."""
         with self.lock:
             if not self.data["enabled"]:
                 return None
@@ -668,7 +699,8 @@ class Schedule:
             )
 
     def next_change(self, when):
-        """Local time at which wanted() next changes, or None (always on, always off, or disabled)."""
+        """Local time at which wanted() next changes, or None (always on,
+        always off, or disabled)."""
         now = self.wanted(when)
         if now is None:
             return None
@@ -688,9 +720,10 @@ class Schedule:
 
 
 class CommandLog:
-    """Every SetMode instruction sent to the boiler: appended to <csv name>.commands.csv and the
-    last KEEP_DAYS kept in memory for the chart, as [epoch ms, "on"|"off", 1 if accepted else 0, source].
-    source is "schedule", or "override:<user>" for the override button."""
+    """Every SetMode instruction sent to the boiler: appended to
+    <csv name>.commands.csv and the last KEEP_DAYS kept in memory for the
+    chart, as [epoch ms, "on"|"off", 1 if accepted else 0, source]. source is
+    "schedule", or "override:<user>" for the override button."""
 
     HEADER = ["time", "ms", "state", "ok", "result", "source"]
     KEEP_DAYS = 31
@@ -748,29 +781,30 @@ class CommandLog:
 
 
 class HeatingController(threading.Thread):
-    """Applies the schedule by telling the boiler, over eBUS, to block or allow central heating.
+    """Applies the schedule by telling the boiler, over eBUS, to block or allow
+    central heating.
 
-    The block only lasts about 15 minutes after the last SetMode message, so the current state is
-    re-sent on every 10-minute boundary of the clock (xx:00, xx:10, ...). It is also sent at once
-    on startup and when the schedule is saved, and at the exact minute of each schedule on/off time
-    (e.g. 07:31), then again on the following boundaries. A failed send is retried after
-    RETRY_SECONDS. When the schedule is disabled, heating is allowed once, and then the boiler goes
-    back to its own controls. The boiler's own timer still applies: the Pi can stop heating, but
-    cannot start it while that timer is off.
+    The block only lasts about 15 minutes after the last SetMode message, so
+    the current state is re-sent on every 10-minute boundary of the clock
+    (xx:00, xx:10, ...). It is also sent at once on startup and when the
+    schedule is saved, and at the exact minute of each schedule on/off time
+    (e.g. 07:31), then again on the following boundaries. A failed send is
+    retried after RETRY_SECONDS. When the schedule is disabled, heating is
+    allowed once, and then the boiler goes back to its own controls. The
+    boiler's own timer still applies: the Pi can stop heating, but cannot start
+    it while that timer is off.
 
-    Override: one "heating on" is sent at once, whatever the schedule says, then nothing for
-    OVERRIDE_SECONDS (the boiler holds it for about 15 minutes); then the schedule state is sent
-    and the normal 10-minute boundaries resume.
-    """
+    Override: one "heating on" is sent at once, whatever the schedule says,
+    then nothing for OVERRIDE_SECONDS (the boiler holds it for about 15
+    minutes); then the schedule state is sent and the normal 10-minute
+    boundaries resume."""
 
     RESEND_SECONDS = 600  # boundary spacing; must divide an hour
     RETRY_SECONDS = 60
-    MAX_SLEEP = (
-        60  # re-check at least this often, in case the clock is stepped
-    )
-    HOLD_SECONDS = (
-        900  # how long the boiler keeps a SetMode block without a repeat
-    )
+    # re-check at least this often, in case the clock is stepped
+    MAX_SLEEP = 60
+    # how long the boiler keeps a SetMode block without a repeat
+    HOLD_SECONDS = 900
     OVERRIDE_SECONDS = 840
 
     def __init__(
@@ -787,15 +821,15 @@ class HeatingController(threading.Thread):
         self.flow_temp, self.hwc_temp = flow_temp, hwc_temp
         self.wake = threading.Event()
         self.sent = None  # "on"/"off" last confirmed by ebusd, or None
-        self.due = None  # local time of the next regular send (boundary or schedule change)
+        # local time of the next regular send (boundary or schedule change)
+        self.due = None
         self.retry_at = None  # local time to retry after a failed send
-        self.last = (
-            None  # {"time", "state", "ok", "result"} of the last attempt
-        )
-        self.last_ok = (
-            None  # the same, for the last attempt the boiler accepted
-        )
-        self.override = None  # {"until": local time, "by": user, "sent": bool} while overriding
+        # {"time", "state", "ok", "result"} of the last attempt
+        self.last = None
+        # the same, for the last attempt the boiler accepted
+        self.last_ok = None
+        # {"until": local time, "by": user, "sent": bool} while overriding
+        self.override = None
         self.requests = []  # override requests from the web, handled by step()
         self.lock = threading.Lock()
 
@@ -833,14 +867,12 @@ class HeatingController(threading.Thread):
                 self.hub.record("HeatingSchedule", state, stamp())
             self.sent = state
         else:
-            print(
-                f"{datetime.datetime.now():%H:%M:%S} SetMode heating {state} failed: {result}",
-                file=sys.stderr,
-            )
+            log(f"SetMode heating {state} failed: {result}")
         return ok
 
     def next_slot(self, now):
-        """The next 10-minute boundary after now, or the next schedule change if that comes first."""
+        """The next 10-minute boundary after now, or the next schedule change
+        if that comes first."""
         step = self.RESEND_SECONDS
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         secs = (now - midnight).total_seconds()
@@ -865,9 +897,8 @@ class HeatingController(threading.Thread):
             )
         if self.override and now >= self.override["until"]:
             self.override = None
-            self.due = self.retry_at = (
-                None  # back to the schedule: send its state now
-            )
+            # back to the schedule: send its state now
+            self.due = self.retry_at = None
             self.hub.record("HeatingOverride", "ended", stamp())
         wanted = self.schedule.wanted(now)
         target = None if wanted is None else ("on" if wanted else "off")
@@ -930,7 +961,8 @@ class HeatingController(threading.Thread):
             and wanted is None
             and self.sent != "off"
         ):
-            nxt_send = None  # override ending with the schedule disabled: nothing more is sent
+            # override ending with the schedule disabled: nothing more is sent
+            nxt_send = None
         if nxt_send is None:
             nxt_state = None
         elif nxt_send == self.retry_at:
@@ -969,7 +1001,8 @@ class HeatingController(threading.Thread):
         times = [t for t in (self.due, self.retry_at) if t]
         if not times:
             return self.MAX_SLEEP
-        # wake just after the due time; if woken early, the next step sees it isn't due and waits again
+        # wake just after the due time; if woken early, the next step sees it
+        # isn't due and waits again
         return max(
             0.01,
             min(self.MAX_SLEEP, (min(times) - now).total_seconds() + 0.02),
@@ -980,22 +1013,18 @@ class HeatingController(threading.Thread):
             try:
                 self.step()
             except Exception as e:  # never let the controller die quietly
-                print(
-                    f"{datetime.datetime.now():%H:%M:%S} heating controller error: {e!r}",
-                    file=sys.stderr,
-                )
+                log(f"heating controller error: {e!r}")
             self.wake.wait(self.sleep_seconds(datetime.datetime.now()))
             self.wake.clear()
 
 
 class FileWriter(threading.Thread):
-    """Appends CSV rows and change-log lines in batches from its own thread,
-    so a stalled SD card holds up only this thread, never the polling or the web UI.
-    """
+    """Appends CSV rows and change-log lines in batches from its own thread, so
+    a stalled SD card holds up only this thread, never the polling or the web
+    UI."""
 
-    MAX_PENDING = (
-        20_000_000  # characters held per file while writes keep failing
-    )
+    # characters held per file while writes keep failing
+    MAX_PENDING = 20_000_000
 
     def __init__(self, csv_path, changes_path, interval):
         super().__init__(daemon=True)
@@ -1020,7 +1049,8 @@ class FileWriter(threading.Thread):
         self.flush()
 
     def stop(self):
-        """Write out everything queued so far (waits up to 30 s for a slow card)."""
+        """Write out everything queued so far (waits up to 30 s for a slow
+        card)."""
         self.stopping.set()
         self.join(timeout=30)
 
@@ -1046,16 +1076,14 @@ class FileWriter(threading.Thread):
                     f.write(data)
                 self.pending[path] = ""
             except OSError as e:  # keep the data and try again next time
-                print(
-                    f"{datetime.datetime.now():%H:%M:%S} cannot write {path}: {e}",
-                    file=sys.stderr,
-                )
+                log(f"cannot write {path}: {e}")
                 if len(data) > self.MAX_PENDING:
                     self.pending[path] = data[-self.MAX_PENDING :]
 
 
 class Hub:
-    """Latest values, chart history and recent changes, shared between the poller and the web clients."""
+    """Latest values, chart history and recent changes, shared between the
+    poller and the web clients."""
 
     def __init__(self, writer, history_minutes, aggs):
         self.aggs = aggs
@@ -1190,9 +1218,8 @@ def poll(hub, writer, host, port):
     names = list(VALUES)
     last = {n: "" for n in names}
     last_read = {n: 0.0 for n in names}
-    prev_flow = (
-        None  # (monotonic time, FlowTemp) of the previous FlowTemp read
-    )
+    # (monotonic time, FlowTemp) of the previous FlowTemp read
+    prev_flow = None
     rise = None  # FlowTemp change in degrees per second
     bus = None
 
@@ -1230,16 +1257,13 @@ def poll(hub, writer, host, port):
             writer.csv_row([now] + [last[n] for n in names])
             hub.publish(now, rise, True)
         except (OSError, ConnectionError) as e:
-            print(
-                f"{datetime.datetime.now():%H:%M:%S} ebusd error: {e}; retrying",
-                file=sys.stderr,
-            )
+            log(f"ebusd error: {e}; retrying")
             hub.publish(stamp(), rise, False)
             bus = None
             time.sleep(5)
 
 
-# ---------------------------------------------------------------- authentication
+# -------------------------------------------------------------- authentication
 
 # role -> permissions. Every API endpoint names the permission it needs.
 ROLES = {
@@ -1259,19 +1283,21 @@ def unb64url(text):
 
 
 class Auth:
-    """Checks passwords against an htpasswd file, looks up roles, and issues/verifies HS256 JWTs.
+    """Checks passwords against an htpasswd file, looks up roles, and
+    issues/verifies HS256 JWTs.
 
-    The user and role files are re-read whenever they change, so editing them needs no restart.
-    Deleting a user or removing their role stops them refreshing; their current token still
-    works until it expires (at most --token-hours).
-    """
+    The user and role files are re-read whenever they change, so editing them
+    needs no restart. Deleting a user or removing their role stops them
+    refreshing; their current token still works until it expires (at most
+    --token-hours)."""
 
     JWT_HEADER = b64url(
         json.dumps(
             {"alg": "HS256", "typ": "JWT"}, separators=(",", ":")
         ).encode()
     )
-    # used for unknown users so a login takes as long whether or not the name exists
+    # used for unknown users so a login takes as long whether or not the name
+    # exists
     DUMMY_HASH = bcrypt.hashpw(b"x", bcrypt.gensalt(6))
     MAX_FAILURES, LOCKOUT_SECONDS = 5, 60
 
@@ -1300,7 +1326,8 @@ class Auth:
 
     @staticmethod
     def _load_key(path):
-        """Signing key, created on first run; kept so restarts don't log everyone out."""
+        """Signing key, created on first run; kept so restarts don't log
+        everyone out."""
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
@@ -1308,11 +1335,13 @@ class Auth:
                 key = f.read().strip()
             if len(key) < 32:
                 sys.exit(
-                    f"{path} is too short to be a signing key; delete it to make a new one"
+                    f"{path} is too short to be a signing key; "
+                    "delete it to make a new one"
                 )
             if os.stat(path).st_mode & 0o077:
                 print(
-                    f"warning: {path} is readable by other users; chmod 600 it",
+                    f"warning: {path} is readable by other users; "
+                    "chmod 600 it",
                     file=sys.stderr,
                 )
             return key
@@ -1343,7 +1372,8 @@ class Auth:
                 pw_hash = pw_hash.split(":", 1)[0]
                 if not pw_hash.startswith(("$2y$", "$2b$", "$2a$")):
                     print(
-                        f"{self.users_path}:{n}: {name} skipped (not a bcrypt hash; use htpasswd -B)",
+                        f"{self.users_path}:{n}: {name} skipped "
+                        "(not a bcrypt hash; use htpasswd -B)",
                         file=sys.stderr,
                     )
                     continue
@@ -1360,7 +1390,8 @@ class Auth:
                 role = role.strip()
                 if role not in ROLES:
                     print(
-                        f"{self.roles_path}:{n}: unknown role {role!r} ignored",
+                        f"{self.roles_path}:{n}: "
+                        f"unknown role {role!r} ignored",
                         file=sys.stderr,
                     )
                     continue
@@ -1374,7 +1405,8 @@ class Auth:
         for name in users:
             if name not in roles:
                 print(
-                    f"{name} has no role in {self.roles_path}, so cannot log in",
+                    f"{name} has no role in {self.roles_path}, "
+                    "so cannot log in",
                     file=sys.stderr,
                 )
         self.users, self.roles, self.mtimes = users, roles, mtimes
@@ -1468,7 +1500,8 @@ class Auth:
         return claims
 
     def refresh(self, claims):
-        """New token for the same login session, re-checking the user still exists and their role."""
+        """New token for the same login session, re-checking the user still
+        exists and their role."""
         role = self.role_of(claims["sub"])
         if role is None:
             return None, (401, "user no longer allowed")
@@ -1480,16 +1513,20 @@ class Auth:
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "frame-ancestors 'none'"
+    ),
 }
 
 
 STATIC_DIR = os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "static"
 )
-# URL path -> file in the static directory. Page shells and assets only, no boiler data, so no token
-# needed: the page checks the token itself (auth.js) and sends you to /login.
+# URL path -> file in the static directory. Page shells and assets only, no
+# boiler data, so no token needed: the page checks the token itself (auth.js)
+# and sends you to /login.
 STATIC_FILES = {
     "/": "index.html",
     "/login": "login.html",
@@ -1507,7 +1544,8 @@ CONTENT_TYPES = {
 
 
 def load_static(static_dir):
-    """URL path -> (content type, bytes) for every STATIC_FILES entry, read once at startup."""
+    """URL path -> (content type, bytes) for every STATIC_FILES entry, read
+    once at startup."""
     files = {}
     for url, name in STATIC_FILES.items():
         path = os.path.join(static_dir, name)
@@ -1586,7 +1624,8 @@ def serve(hub, auth, controller, static, bind, port):
                     self._json(
                         403,
                         {
-                            "error": f"your role ({self.claims['role']}) cannot do this"
+                            "error": f"your role ({self.claims['role']}) "
+                            "cannot do this"
                         },
                     )
                     return
@@ -1654,10 +1693,9 @@ def serve(hub, auth, controller, static, bind, port):
                 return
             info, err = auth.login(name, password, self.client_address[0])
             if err:
-                print(
-                    f"{datetime.datetime.now():%H:%M:%S} login failed for {name!r} from "
-                    f"{self.client_address[0]}: {err[1]}",
-                    file=sys.stderr,
+                log(
+                    f"login failed for {name!r} from "
+                    f"{self.client_address[0]}: {err[1]}"
                 )
                 self._json(err[0], {"error": err[1]})
             else:
@@ -1713,10 +1751,9 @@ def serve(hub, auth, controller, static, bind, port):
             except OSError as e:
                 self._json(500, {"error": f"cannot save schedule: {e}"})
                 return
-            print(
-                f"{datetime.datetime.now():%H:%M:%S} schedule saved by {self.claims['sub']} "
-                f"(enabled: {checked['enabled']})",
-                file=sys.stderr,
+            log(
+                f"schedule saved by {self.claims['sub']} "
+                f"(enabled: {checked['enabled']})"
             )
             controller.wake.set()  # apply it now
             time.sleep(
@@ -1726,10 +1763,7 @@ def serve(hub, auth, controller, static, bind, port):
 
         def _override(self):
             user = self.claims["sub"]
-            print(
-                f"{datetime.datetime.now():%H:%M:%S} heating override by {user}",
-                file=sys.stderr,
-            )
+            log(f"heating override by {user}")
             controller.request_override(user)
             time.sleep(0.5)  # usually long enough for the send to finish
             self._schedule_reply()
@@ -1774,7 +1808,8 @@ def serve(hub, auth, controller, static, bind, port):
                     self.send_header(k, v)
                 self.end_headers()
                 self._push(snap)
-                # the token was checked when the stream opened; end it when the token expires,
+                # the token was checked when the stream opened; end it when the
+                # token expires,
                 # and the page reconnects with its refreshed token
                 while (
                     not getattr(q, "dropped", False)
@@ -1829,7 +1864,8 @@ def main():
         "--history-minutes",
         type=int,
         default=60,
-        help="chart history kept in memory, i.e. the longest chart window (default: 60)",
+        help="chart history kept in memory, i.e. the longest chart window "
+        "(default: 60)",
     )
     ap.add_argument(
         "--flush-seconds",
@@ -1850,7 +1886,8 @@ def main():
     ap.add_argument(
         "--secret-file",
         default="boiler-ui.secret",
-        help="token signing key, created if missing (default: ./boiler-ui.secret)",
+        help="token signing key, created if missing "
+        "(default: ./boiler-ui.secret)",
     )
     ap.add_argument(
         "--token-hours",
@@ -1872,18 +1909,21 @@ def main():
         "--flow-temp",
         type=float,
         default=75,
-        help="heating flow temperature sent with each SetMode, °C (default: 75)",
+        help="heating flow temperature sent with each SetMode, °C "
+        "(default: 75)",
     )
     ap.add_argument(
         "--hwc-temp",
         type=float,
         default=52.5,
-        help="hot water temperature sent with each SetMode, °C (default: 52.5)",
+        help="hot water temperature sent with each SetMode, °C "
+        "(default: 52.5)",
     )
     ap.add_argument(
         "--static-dir",
         default=STATIC_DIR,
-        help="directory with the web UI's HTML, JS and CSS files (default: static next to this program)",
+        help="directory with the web UI's HTML, JS and CSS files "
+        "(default: static next to this program)",
     )
     args = ap.parse_args()
     static = load_static(args.static_dir)
@@ -1929,11 +1969,12 @@ def main():
             )
         if needs_header(a.path):
             writer.csv_row(a.header(), a.path)
-    if (
-        missing
-    ):  # first run with summaries: build them from the existing CSV (one-off, may take a while)
+    # first run with summaries: build them from the existing CSV (one-off, may
+    # take a while)
+    if missing:
         print(
-            f"building {', '.join(a.path for a in missing)} from {args.csv}...",
+            f"building {', '.join(a.path for a in missing)} "
+            f"from {args.csv}...",
             file=sys.stderr,
         )
         t0 = time.monotonic()
