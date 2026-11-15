@@ -15,7 +15,7 @@ DEBROOT := build/deb
 .PHONY: deb
 deb:
 	rm -rf $(DEBROOT) $(DEB)
-	install -d $(DEBROOT)/DEBIAN $(DEBROOT)/usr/bin $(DEBROOT)/usr/lib/$(PKG) \
+	install -d $(DEBROOT)/DEBIAN $(DEBROOT)/usr/bin $(DEBROOT)/usr/lib/$(PKG)/static \
 		$(DEBROOT)/usr/lib/systemd/system $(DEBROOT)/usr/share/$(PKG) \
 		$(DEBROOT)/usr/share/doc/$(PKG) $(DEBROOT)/etc/default
 	sed -e 's/@VERSION@/$(VERSION)/' -e 's/@MAINTAINER@/$(MAINTAINER)/' \
@@ -23,6 +23,7 @@ deb:
 	install -m 0644 packaging/deb/conffiles $(DEBROOT)/DEBIAN/
 	install -m 0755 packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm $(DEBROOT)/DEBIAN/
 	install -m 0755 app/$(PKG).py $(DEBROOT)/usr/lib/$(PKG)/
+	install -m 0644 app/static/* $(DEBROOT)/usr/lib/$(PKG)/static/
 	ln -s ../lib/$(PKG)/$(PKG).py $(DEBROOT)/usr/bin/
 	install -m 0644 packaging/deb/$(PKG).service $(DEBROOT)/usr/lib/systemd/system/
 	install -m 0644 packaging/deb/default $(DEBROOT)/etc/default/$(PKG)
