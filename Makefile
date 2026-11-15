@@ -14,28 +14,12 @@ DEBROOT := build/deb
 
 .PHONY: deb
 deb:
-	rm -rf $(DEBROOT) $(DEB)
-	install -d $(DEBROOT)/DEBIAN $(DEBROOT)/usr/bin $(DEBROOT)/usr/lib/$(PKG)/static \
-		$(DEBROOT)/usr/lib/systemd/system $(DEBROOT)/usr/share/$(PKG) \
-		$(DEBROOT)/usr/share/doc/$(PKG) $(DEBROOT)/etc/default
-	sed -e 's/@VERSION@/$(VERSION)/' -e 's/@MAINTAINER@/$(MAINTAINER)/' \
-		packaging/deb/control >$(DEBROOT)/DEBIAN/control
-	install -m 0644 packaging/deb/conffiles $(DEBROOT)/DEBIAN/
-	install -m 0755 packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm $(DEBROOT)/DEBIAN/
-	install -m 0755 app/$(PKG).py $(DEBROOT)/usr/lib/$(PKG)/
-	install -m 0644 app/static/* $(DEBROOT)/usr/lib/$(PKG)/static/
-	ln -s ../lib/$(PKG)/$(PKG).py $(DEBROOT)/usr/bin/
-	install -m 0644 packaging/deb/$(PKG).service $(DEBROOT)/usr/lib/systemd/system/
-	install -m 0644 packaging/deb/default $(DEBROOT)/etc/default/$(PKG)
-	install -m 0644 packaging/deb/roles.example $(DEBROOT)/usr/share/$(PKG)/
-	install -m 0644 LICENSE $(DEBROOT)/usr/share/doc/$(PKG)/copyright
-	install -m 0644 README.md $(DEBROOT)/usr/share/doc/$(PKG)/
-	dpkg-deb --root-owner-group -Zxz --build $(DEBROOT) $(DEB)
-	@echo "built $(DEB)"
+	./make_deb.sh --pkg '$(PKG)' --version '$(VERSION)' --maintainer '$(MAINTAINER)' \
+		--deb '$(DEB)' --debroot '$(DEBROOT)'
 
 .PHONY: lint-deb
 lint-deb: deb
-	shellcheck packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm
+	shellcheck make_deb.sh packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm
 	@# verify a copy that runs the built program, as it isn't installed here
 	install -d build/verify
 	sed 's|/usr/bin/$(PKG)|$(CURDIR)/$(DEBROOT)/usr/bin/$(PKG)|' packaging/deb/$(PKG).service \
