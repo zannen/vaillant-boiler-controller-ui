@@ -55,6 +55,7 @@ The package installs:
 | Path | Contents |
 | ---- | -------- |
 | `/usr/bin/vaillant-boiler-ui` | the program |
+| `/usr/lib/vaillant-boiler-ui/static/` | the web UI's HTML, JS and CSS files, read at startup |
 | `/usr/lib/systemd/system/vaillant-boiler-ui.service` | service, enabled on install; it waits until `users.htpasswd` has a user |
 | `/etc/vaillant-boiler-ui/users.htpasswd`, `roles` | logins (root-owned, readable by the service only) |
 | `/etc/default/vaillant-boiler-ui` | extra options in `BOILER_UI_OPTS` |
