@@ -30,9 +30,12 @@ sudo systemctl enable ebusd
 Build the package (needs `dpkg-deb`; `make lint-deb` also needs `shellcheck`):
 
 ```sh
-make deb                  # or: make deb VERSION=0.2.0
+make deb VERSION=0.2.0
 scp build/vaillant-boiler-ui_*_all.deb "$SERVER_USER@$SERVER_ADDR:"
 ```
+
+Or push a tag such as `v0.2.0`: CI builds the package for that version and keeps it as a
+workflow artifact (`vaillant-boiler-ui-v0.2.0-deb` on the run's page).
 
 On the Pi:
 
@@ -55,6 +58,7 @@ The package installs:
 | Path | Contents |
 | ---- | -------- |
 | `/usr/bin/vaillant-boiler-ui` | the program |
+| `/usr/lib/vaillant-boiler-ui/static/` | the web UI's HTML, JS and CSS files, read at startup |
 | `/usr/lib/systemd/system/vaillant-boiler-ui.service` | service, enabled on install; it waits until `users.htpasswd` has a user |
 | `/etc/vaillant-boiler-ui/users.htpasswd`, `roles` | logins (root-owned, readable by the service only) |
 | `/etc/default/vaillant-boiler-ui` | extra options in `BOILER_UI_OPTS` |
@@ -84,6 +88,18 @@ Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
 - The flow and hot water temperatures sent with each message default to 75 and 52.5 °C; change them with
   `--flow-temp` and `--hwc-temp` in `BOILER_UI_OPTS`.
 - If the app or the Pi stops, the boiler returns to its own controls within about 15 minutes.
+
+## Development
+
+Lint the shell scripts, YAML, Python, JS, CSS and HTML as CI does:
+
+```sh
+pip install -r requirements-dev.txt   # black, flake8, mypy, pylint and yamllint, e.g. in a virtualenv
+npm ci                                # ESLint, Stylelint and HTMLHint
+make lint
+```
+
+`make format` reformats the Python code with black.
 
 ## Hardware
 

@@ -1,0 +1,10 @@
+:root { color-scheme: dark; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0d0d0d; color: #f0efec;
+       font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+form { background: #1a1a19; border-radius: 8px; padding: 24px 28px; display: grid; gap: 12px; width: 280px; }
+h1 { margin: 0 0 4px; font-size: 18px; }
+label { display: grid; gap: 4px; color: #c3c2b7; }
+input { background: #0d0d0d; color: #f0efec; border: 1px solid #383835; border-radius: 6px; padding: 7px 9px; font: inherit; }
+button { background: #3987e5; color: #fff; border: 0; border-radius: 6px; padding: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: 0.6; cursor: default; }
+#err { color: #f85149; min-height: 1.4em; margin: 0; }
