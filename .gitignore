@@ -4,3 +4,4 @@ __pycache__/
 *.tar.gz
 *.zip
 build/
+node_modules/
