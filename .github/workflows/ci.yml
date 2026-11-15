@@ -32,7 +32,7 @@ jobs:
       - name: Install linters
         run: pip install -r requirements-dev.txt
 
-      - name: Ruff
+      - name: black, flake8, mypy and pylint
         run: make lint-py
 
       - name: yamllint

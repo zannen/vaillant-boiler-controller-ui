@@ -94,10 +94,12 @@ Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
 Lint the shell scripts, YAML, Python, JS, CSS and HTML as CI does:
 
 ```sh
-pip install -r requirements-dev.txt   # ruff and yamllint, e.g. in a virtualenv
+pip install -r requirements-dev.txt   # black, flake8, mypy, pylint and yamllint, e.g. in a virtualenv
 npm ci                                # ESLint, Stylelint and HTMLHint
 make lint
 ```
+
+`make format` reformats the Python code with black.
 
 ## Hardware
 
