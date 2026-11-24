@@ -61,7 +61,8 @@ The package installs:
 
 | Path | Contents |
 | ---- | -------- |
-| `/usr/bin/vaillant-boiler-ui` | the program |
+| `/usr/bin/vaillant-boiler-ui.py` | the program (a link to `/usr/lib/vaillant-boiler-ui/vaillant-boiler-ui.py`) |
+| `/usr/lib/vaillant-boiler-ui/vaillant_boiler_ui/` | the program's Python modules |
 | `/usr/lib/vaillant-boiler-ui/static/` | the web UI's HTML, JS and CSS files, read at startup |
 | `/usr/lib/systemd/system/vaillant-boiler-ui.service` | service, enabled on install; it waits until `users.htpasswd` has a user |
 | `/etc/vaillant-boiler-ui/users.htpasswd`, `roles` | logins (root-owned, readable by the service only) |
