@@ -5,16 +5,19 @@ import os
 import threading
 
 from .csv_files import needs_header, tail_lines
+from .samples import number
 from .util import epoch_ms
 
 
 class CommandLog:
     """Every SetMode instruction sent to the boiler: appended to
     <csv name>.commands.csv and the last KEEP_DAYS kept in memory for the
-    chart, as [epoch ms, "on"|"off", 1 if accepted else 0, source]. source is
-    "schedule", or "override:<user>" for the override button."""
+    chart, as [epoch ms, "on"|"off", 1 if accepted else 0, source, flow
+    temperature, hot water temperature]. source is "schedule", or
+    "override:<user>" for the override button. The temperatures are None in
+    rows logged before they were recorded."""
 
-    HEADER = ["time", "ms", "state", "ok", "result", "source"]
+    HEADER = ["time", "ms", "state", "ok", "result", "source", "flow", "hwc"]
     KEEP_DAYS = 31
 
     def __init__(self, path, hub, writer):
@@ -40,13 +43,17 @@ class CommandLog:
             except ValueError:
                 continue
             if ms >= cutoff:
-                rows.append([ms, r[2], int(r[3] == "1"), r[5] or "schedule"])
+                rows.append(
+                    [ms, r[2], int(r[3] == "1"), r[5] or "schedule"]
+                    + [number(t) for t in r[6:8]]
+                )
         rows.sort(key=lambda r: r[0])
         with self.lock:
             self.rows.extend(rows)
         return len(rows)
 
-    def add(self, state, ok, result, source):
+    def add(self, state, ok, result, source, temps):
+        """Log one send; temps is (flow, hot water) in °C."""
         ms = epoch_ms()
         when = datetime.datetime.fromtimestamp(ms / 1000).isoformat(
             timespec="milliseconds"
@@ -54,9 +61,9 @@ class CommandLog:
         if needs_header(self.path) and not self.rows:
             self.writer.csv_row(self.HEADER, self.path)
         self.writer.csv_row(
-            [when, ms, state, int(ok), result, source], self.path
+            [when, ms, state, int(ok), result, source, *temps], self.path
         )
-        row = [ms, state, int(ok), source]
+        row = [ms, state, int(ok), source, *temps]
         with self.lock:
             self.rows.append(row)
             cutoff = ms - self.KEEP_DAYS * 86400000

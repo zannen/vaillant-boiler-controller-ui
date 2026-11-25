@@ -208,9 +208,7 @@ def main():
         f"loaded {commands.load()} boiler instructions from {commands.path}",
         file=sys.stderr,
     )
-    controller = HeatingController(
-        schedule, hub, commands, host, int(port), args.flow_temp, args.hwc_temp
-    )
+    controller = HeatingController(schedule, hub, commands, host, int(port))
     writer.start()
     controller.start()
     serve(hub, auth, controller, static, args.bind, args.port)

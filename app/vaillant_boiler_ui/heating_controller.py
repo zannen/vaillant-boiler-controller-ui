@@ -22,7 +22,11 @@ class HeatingController(threading.Thread):
     Override: one "heating on" is sent at once, whatever the schedule says,
     then nothing for OVERRIDE_SECONDS (the boiler holds it for about 15
     minutes); then the schedule state is sent and the normal 10-minute
-    boundaries resume."""
+    boundaries resume.
+
+    Each SetMode carries the heating flow and hot water temperatures saved
+    with the schedule. When they change, the current state (or the override's
+    "heating on") is sent again at once with the new temperatures."""
 
     RESEND_SECONDS = 600  # boundary spacing; must divide an hour
     RETRY_SECONDS = 60
@@ -32,9 +36,7 @@ class HeatingController(threading.Thread):
     HOLD_SECONDS = 900
     OVERRIDE_SECONDS = 840
 
-    def __init__(
-        self, schedule, hub, commands, host, port, flow_temp, hwc_temp
-    ):
+    def __init__(self, schedule, hub, commands, host, port):
         super().__init__(daemon=True)
         self.schedule, self.hub, self.commands, self.host, self.port = (
             schedule,
@@ -43,7 +45,8 @@ class HeatingController(threading.Thread):
             host,
             port,
         )
-        self.flow_temp, self.hwc_temp = flow_temp, hwc_temp
+        # (flow, hot water) temperatures last confirmed by ebusd, or None
+        self.sent_temps = None
         self.wake = threading.Event()
         self.sent = None  # "on"/"off" last confirmed by ebusd, or None
         # local time of the next regular send (boundary or schedule change)
@@ -63,16 +66,22 @@ class HeatingController(threading.Thread):
             self.requests.append(user)
         self.wake.set()
 
-    def setmode(self, off):
-        return (
-            f"auto;{self.flow_temp:g};{self.hwc_temp:g};-;{int(off)};0;0;0;0;0"
-        )
+    @staticmethod
+    def setmode(off, flow_temp, hwc_temp):
+        return f"auto;{flow_temp:g};{hwc_temp:g};-;{int(off)};0;0;0;0;0"
+
+    def temps_changed(self):
+        """True if the saved temperatures differ from those last sent."""
+        return self.schedule.temps() != self.sent_temps
 
     def send(self, state, source="schedule"):
+        temps = self.schedule.temps()
         try:
             bus = Ebusd(self.host, self.port)
             try:
-                result = bus.write("SetMode", self.setmode(state == "off"))
+                result = bus.write(
+                    "SetMode", self.setmode(state == "off", *temps)
+                )
             finally:
                 bus.close()
             ok = not result.startswith("ERR")
@@ -84,13 +93,17 @@ class HeatingController(threading.Thread):
             "ok": ok,
             "result": result,
             "source": source,
+            "flowTemp": temps[0],
+            "hwcTemp": temps[1],
         }
-        self.commands.add(state, ok, result, source)
+        self.commands.add(state, ok, result, source, temps)
         if ok:
             self.last_ok = self.last
             if state != self.sent:
                 self.hub.record("HeatingSchedule", state, stamp())
-            self.sent = state
+            self.hub.record("SetModeFlowTemp", f"{temps[0]:g}", stamp())
+            self.hub.record("SetModeHwcTemp", f"{temps[1]:g}", stamp())
+            self.sent, self.sent_temps = state, temps
         else:
             log(f"SetMode heating {state} failed: {result}")
         return ok
@@ -129,7 +142,7 @@ class HeatingController(threading.Thread):
         target = None if wanted is None else ("on" if wanted else "off")
         if self.override:
             o = self.override
-            if not o["sent"] and (
+            if (not o["sent"] or self.temps_changed()) and (
                 self.retry_at is None or now >= self.retry_at
             ):
                 if self.send("on", f"override:{o['by']}"):
@@ -162,6 +175,7 @@ class HeatingController(threading.Thread):
                 or now >= self.due
                 or (failed and now >= self.retry_at)
                 or (not failed and target != self.sent)
+                or (not failed and self.temps_changed())
             )  # e.g. the schedule was just saved
             if need:
                 ok = self.send(target)
