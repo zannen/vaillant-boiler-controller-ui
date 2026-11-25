@@ -6,9 +6,9 @@ Section: misc
 Priority: optional
 Depends: python3 (>= 3.7), python3-bcrypt, adduser
 Recommends: apache2-utils
-Suggests: ebusd
+Suggests: ebusd, sqlite3
 Homepage: https://github.com/zannen/vaillant-boiler-controller-ui
 Description: logger and web UI for Vaillant boilers via ebusd
- Polls a Vaillant boiler through ebusd, logs readings to CSV and serves a
+ Polls a Vaillant boiler through ebusd, logs readings to SQLite and serves a
  live web UI with gauges, charts and a change log. Logins are checked against
  an htpasswd file, with admin, user and viewer roles.
