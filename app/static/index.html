@@ -42,10 +42,19 @@
         title="send one 'heating on' now, whatever the schedule says; the schedule takes over again after 14 minutes">Heating ON for 14 min</button>
       <span class="kv" id="override-info"></span>
     </div>
+    <div class="bar kv" id="sched-temps"
+      title="sent to the boiler with each instruction, while the schedule is enabled or an override is on"></div>
     <div id="sched-view"></div>
     <form id="sched-form" hidden>
       <label class="kv"><input type="checkbox" id="sched-enabled">
         Schedule enabled (when disabled, the boiler follows its own controls)</label>
+      <div class="bar temps">
+        <label class="kv">Heating flow <input type="number" id="flow-temp" required> °C</label>
+        <label class="kv">Hot water <input type="number" id="hwc-temp" required> °C</label>
+      </div>
+      <div class="note">Sent to the boiler with each instruction while the schedule is enabled or an override is on;
+        otherwise the boiler's own knobs apply. The boiler's d.71 setting (75 °C unless changed) still caps the
+        heating flow.</div>
       <div id="sched-days"></div>
       <div class="bar">
         <button class="btn primary" type="submit">Save</button>

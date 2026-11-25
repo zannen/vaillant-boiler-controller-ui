@@ -511,6 +511,7 @@ function fillCommandTip() {
   for (const c of commands) { if (c[0] > t) break; prev = c; }
   if (prev) add(`last send ${clock(prev[0], true)}: ${prev[1]}${sourceText(prev[3])}${prev[2] ? "" : " (failed)"}`,
                 prev[2] ? null : "var(--bad)");
+  if (prev && prev[4] != null) add(`flow ${degrees(prev[4])}, hot water ${degrees(prev[5])}`);
   tip.replaceChildren(...rows);
 }
 
@@ -677,6 +678,17 @@ function renderSchedule() {
   }
   view.replaceChildren(...rows);
   view.style.opacity = sched.enabled ? "" : "0.45";
+  showTemps();
+}
+
+const degrees = t => t == null ? "—" : `${t} °C`;
+
+// The temperatures sent with each SetMode
+function showTemps() {
+  const box = document.getElementById("sched-temps");
+  box.replaceChildren("Heating flow ", el("b", null, degrees(sched.flowTemp)),
+                      " · Hot water ", el("b", null, degrees(sched.hwcTemp)));
+  box.style.opacity = sched.enabled ? "" : "0.45";
 }
 
 // "Last instruction" in the status bar: what the boiler last accepted, how long ago, and any later failure
@@ -786,6 +798,14 @@ function readDay(box) {
 function openEditor() {
   editing = true;
   document.getElementById("sched-enabled").checked = sched.enabled;
+  for (const [id, field] of [["flow-temp", "flowTemp"], ["hwc-temp", "hwcTemp"]]) {
+    const input = document.getElementById(id), [lo, hi] = sched.tempLimits[field];
+    input.min = lo;
+    input.max = hi;
+    input.step = sched.tempStep;
+    input.value = sched[field];
+    input.title = `${lo}–${hi} °C, in steps of ${sched.tempStep}`;
+  }
   const days = sched.dayOrder.map(day => {
     const row = el("div", "eday"), box = el("div", "periods");
     box.dataset.day = day;
@@ -832,7 +852,11 @@ document.getElementById("sched-form").addEventListener("submit", e => {
   err.textContent = "saving…";
   api("/api/schedule", {
     method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled: document.getElementById("sched-enabled").checked, days }),
+    body: JSON.stringify({
+      enabled: document.getElementById("sched-enabled").checked, days,
+      flowTemp: +document.getElementById("flow-temp").value,
+      hwcTemp: +document.getElementById("hwc-temp").value,
+    }),
   }).then(async r => {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || `save failed (${r.status})`);
