@@ -41,8 +41,8 @@ lint-yaml:
 lint-py:
 	black --check --diff app
 	flake8 app
-	mypy app/vaillant-boiler-ui.py
-	pylint app/vaillant-boiler-ui.py
+	mypy app/vaillant-boiler-ui.py app/vaillant_boiler_ui
+	pylint app/vaillant-boiler-ui.py app/vaillant_boiler_ui
 
 .PHONY: format
 format:

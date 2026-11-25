@@ -36,6 +36,7 @@ cd "$(dirname "$0")"
 
 rm -rf "$debroot" "$deb"
 install -d "$debroot/DEBIAN" "$debroot/usr/bin" "$debroot/usr/lib/$pkg/static" \
+	"$debroot/usr/lib/$pkg/vaillant_boiler_ui" \
 	"$debroot/usr/lib/systemd/system" "$debroot/usr/share/$pkg" \
 	"$debroot/usr/share/doc/$pkg" "$debroot/etc/default"
 sed -e "s/@VERSION@/$version/" -e "s/@MAINTAINER@/$maintainer/" \
@@ -43,6 +44,7 @@ sed -e "s/@VERSION@/$version/" -e "s/@MAINTAINER@/$maintainer/" \
 install -m 0644 packaging/deb/conffiles "$debroot/DEBIAN/"
 install -m 0755 packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm "$debroot/DEBIAN/"
 install -m 0755 "app/$pkg.py" "$debroot/usr/lib/$pkg/"
+install -m 0644 app/vaillant_boiler_ui/*.py "$debroot/usr/lib/$pkg/vaillant_boiler_ui/"
 install -m 0644 app/static/* "$debroot/usr/lib/$pkg/static/"
 ln -s "../lib/$pkg/$pkg.py" "$debroot/usr/bin/"
 install -m 0644 "packaging/deb/$pkg.service" "$debroot/usr/lib/systemd/system/"
