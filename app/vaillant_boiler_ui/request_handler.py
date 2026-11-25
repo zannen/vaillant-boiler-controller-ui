@@ -8,7 +8,13 @@ from .auth import Auth
 from .heating_controller import HeatingController
 from .hub import Hub
 from .roles import ROLES
-from .schedule_rules import DAY_KEYS, MAX_PERIODS, validate_schedule
+from .schedule_rules import (
+    DAY_KEYS,
+    MAX_PERIODS,
+    TEMP_LIMITS,
+    TEMP_STEP,
+    validate_schedule,
+)
 from .util import log
 
 SECURITY_HEADERS = {
@@ -194,6 +200,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 **self.controller.schedule.get(),
                 "maxPeriods": MAX_PERIODS,
                 "dayOrder": DAY_KEYS,
+                "tempLimits": TEMP_LIMITS,
+                "tempStep": TEMP_STEP,
                 "status": status,
             },
         )
