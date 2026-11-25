@@ -67,7 +67,7 @@ The package installs:
 | `/usr/lib/systemd/system/vaillant-boiler-ui.service` | service, enabled on install; it waits until `users.htpasswd` has a user |
 | `/etc/vaillant-boiler-ui/users.htpasswd`, `roles` | logins (root-owned, readable by the service only) |
 | `/etc/default/vaillant-boiler-ui` | extra options in `BOILER_UI_OPTS` |
-| `/var/lib/vaillant-boiler-ui/` | CSV logs, summaries, change log, boiler instructions (`boiler.commands.csv`), heating schedule and token signing key |
+| `/var/lib/vaillant-boiler-ui/` | `boiler.db` (see [Data](#data)) and the token signing key |
 
 It runs as the `boiler-ui` system user. `sudo apt purge vaillant-boiler-ui` deletes the logins and all logged data.
 
@@ -86,7 +86,7 @@ Hot water is never blocked. Disabling the schedule allows heating once; then the
 Users and admins also get a **Heating ON for 14 min** button. It sends one "heating on" at once, whatever
 the schedule says, then nothing for 14 minutes (the boiler holds it for about 15); then the schedule's
 state is sent and the 10-minute boundaries resume. Pressing it again restarts the 14 minutes.
-Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
+Every instruction, with what triggered it, is logged in the database's `commands` table.
 
 - Set the boiler's own timer to be on whenever you *might* want heating: the app can switch heating off, but not on.
 - ebusd must allow writes: add `--accesslevel=*` to `EBUSD_OPTS` in `/etc/default/ebusd`.
@@ -97,14 +97,48 @@ Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
   75 and 52.5 °C are used; change those defaults with `--flow-temp` and `--hwc-temp` in `BOILER_UI_OPTS`.
 - If the app or the Pi stops, the boiler returns to its own controls within about 15 minutes.
 
+## Data
+
+Everything the app logs, and the heating schedule, is kept in one SQLite database,
+`/var/lib/vaillant-boiler-ui/boiler.db`:
+
+| Table | Contents |
+| ----- | -------- |
+| `samples` | every reading: `ms` (Unix time in milliseconds) and the raw ebusd value of each boiler value |
+| `summaries` | mean, min and max of the chart values per 1-minute and 15-minute `tier` |
+| `changes` | the change list |
+| `commands` | every `SetMode` instruction sent to the boiler |
+| `schedule`, `schedule_periods` | the heating schedule and temperatures |
+
+It is written every 30 s (`--flush-seconds`), one transaction at a time, so a power cut loses at most the
+last batch and never leaves a damaged file. To look at it, install `sqlite3` and work on a copy:
+
+```sh
+sudo sqlite3 /var/lib/vaillant-boiler-ui/boiler.db ".backup /tmp/boiler.db"
+sqlite3 -csv -header /tmp/boiler.db \
+  "SELECT datetime(ms / 1000, 'unixepoch', 'localtime') AS time, * FROM samples ORDER BY ms DESC LIMIT 100"
+```
+
+**Upgrading from a version that wrote CSV files:** the first start imports `boiler.csv`, its `.changes.log`,
+`.1min.csv`, `.15min.csv` and `.commands.csv` files, and `schedule.json`, once. The small files are imported
+before the app starts; `boiler.csv` is imported in the background while it runs, and the charts fill in
+when it is done. It carries on after a restart. Follow it with `journalctl -u vaillant-boiler-ui`; when it
+logs "the old CSV files can now be deleted", you can delete them.
+
+**Schema changes** are in `app/vaillant_boiler_ui/migrations.py`, applied in order at startup. The
+database's `PRAGMA user_version` counts those applied. Never edit a migration that is on `main`: add a new
+one. Before applying new migrations to an existing database the app copies it to `boiler.db.before-vN`.
+A boiler value added to `VALUES` needs no migration: its column is added at startup.
+
 ## Development
 
 Lint the shell scripts, YAML, Python, JS, CSS and HTML as CI does:
 
 ```sh
-pip install -r requirements-dev.txt   # black, flake8, mypy, pylint and yamllint, e.g. in a virtualenv
+pip install -r requirements-dev.txt   # black, flake8, mypy, pylint, pytest and yamllint, e.g. in a virtualenv
 npm ci                                # ESLint, Stylelint and HTMLHint
 make lint
+make test                             # Python tests
 ```
 
 `make format` reformats the Python code with black.
