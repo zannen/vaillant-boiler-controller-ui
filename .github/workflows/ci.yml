@@ -18,7 +18,7 @@ jobs:
         run: make lint-sh
 
   lint-py-yaml:
-    name: Lint Python and YAML
+    name: Lint and test Python, lint YAML
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v6
@@ -34,6 +34,9 @@ jobs:
 
       - name: black, flake8, mypy and pylint
         run: make lint-py
+
+      - name: Tests
+        run: make test
 
       - name: yamllint
         run: make lint-yaml
