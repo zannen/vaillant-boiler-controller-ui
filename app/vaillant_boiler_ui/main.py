@@ -35,6 +35,7 @@ from .history import backfill, load_agg, load_changes, load_history
 from .hub import Hub
 from .poller import poll
 from .schedule import Schedule
+from .schedule_rules import check_temp
 from .server import serve
 from .static_files import STATIC_DIR, load_static
 
@@ -113,15 +114,15 @@ def main():
         "--flow-temp",
         type=float,
         default=75,
-        help="heating flow temperature sent with each SetMode, °C "
-        "(default: 75)",
+        help="heating flow temperature sent with each SetMode until an admin "
+        "sets one on the web page, °C (default: 75)",
     )
     ap.add_argument(
         "--hwc-temp",
         type=float,
         default=52.5,
-        help="hot water temperature sent with each SetMode, °C "
-        "(default: 52.5)",
+        help="hot water temperature sent with each SetMode until an admin "
+        "sets one on the web page, °C (default: 52.5)",
     )
     ap.add_argument(
         "--static-dir",
@@ -130,6 +131,13 @@ def main():
         "(default: static next to this program)",
     )
     args = ap.parse_args()
+    for option, field, value in (
+        ("--flow-temp", "flowTemp", args.flow_temp),
+        ("--hwc-temp", "hwcTemp", args.hwc_temp),
+    ):
+        err = check_temp(field, value)
+        if err:
+            ap.error(f"{option}: {err}")
     static = load_static(args.static_dir)
     changes = args.changes or os.path.splitext(args.csv)[0] + ".changes.log"
     host, _, port = args.ebusd.rpartition(":")
@@ -192,7 +200,8 @@ def main():
         args.schedule
         or os.path.join(
             os.path.dirname(os.path.abspath(args.csv)), "schedule.json"
-        )
+        ),
+        {"flowTemp": args.flow_temp, "hwcTemp": args.hwc_temp},
     )
     commands = CommandLog(f"{base}.commands.csv", hub, writer)
     print(

@@ -4,19 +4,29 @@ import os
 import sys
 import threading
 
-from .schedule_rules import DAY_KEYS, parse_hhmm, validate_schedule
+from .schedule_rules import (
+    DAY_KEYS,
+    TEMP_LIMITS,
+    parse_hhmm,
+    validate_schedule,
+)
 from .util import stamp
 
 
 class Schedule:
-    """7-day heating schedule, kept in a JSON file and saved atomically."""
+    """7-day heating schedule, and the heating flow and hot water
+    temperatures sent with it, kept in a JSON file and saved atomically.
 
-    def __init__(self, path):
+    temps holds the temperatures used until some are saved, e.g. from a file
+    written before they could be set: {"flowTemp": 75.0, "hwcTemp": 52.5}."""
+
+    def __init__(self, path, temps):
         self.path = path
         self.lock = threading.Lock()
         self.data = {
             "enabled": False,
             "days": {d: [] for d in DAY_KEYS},
+            **temps,
             "updatedBy": None,
             "updatedAt": None,
         }
@@ -28,6 +38,7 @@ class Schedule:
                 if err:
                     raise ValueError(err)
                 self.data = {
+                    **temps,
                     **checked,
                     "updatedBy": saved.get("updatedBy"),
                     "updatedAt": saved.get("updatedAt"),
@@ -40,7 +51,10 @@ class Schedule:
             return json.loads(json.dumps(self.data))
 
     def set(self, checked, user):
-        data = {**checked, "updatedBy": user, "updatedAt": stamp()}
+        """Save a checked schedule; temperatures it leaves out are kept."""
+        with self.lock:
+            temps = {k: self.data[k] for k in TEMP_LIMITS}
+        data = {**temps, **checked, "updatedBy": user, "updatedAt": stamp()}
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=1)
@@ -50,6 +64,11 @@ class Schedule:
         with self.lock:
             self.data = data
         return self.get()
+
+    def temps(self):
+        """(heating flow, hot water) temperatures to send, °C."""
+        with self.lock:
+            return self.data["flowTemp"], self.data["hwcTemp"]
 
     def wanted(self, when):
         """True if heating should be allowed at this (local) time, False if
