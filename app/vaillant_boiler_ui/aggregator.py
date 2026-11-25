@@ -1,5 +1,4 @@
 import collections
-import datetime
 
 from .constants import SAMPLE_KEYS
 
@@ -8,12 +7,11 @@ class Aggregator:
     """Summarises chart samples into fixed time buckets: [start ms, mean, min,
     max of each SAMPLE_KEYS value]."""
 
-    def __init__(self, name, bucket_ms, keep_minutes, path):
-        self.name, self.bucket_ms, self.keep_minutes, self.path = (
+    def __init__(self, name, bucket_ms, keep_minutes):
+        self.name, self.bucket_ms, self.keep_minutes = (
             name,
             bucket_ms,
             keep_minutes,
-            path,
         )
         self.rows = collections.deque()
         self.start = None  # start of the bucket being filled
@@ -25,17 +23,6 @@ class Aggregator:
             "bucketMs": self.bucket_ms,
             "keepMinutes": self.keep_minutes,
         }
-
-    def header(self):
-        return ["time", "ms"] + [
-            f"{k}_{s}" for k in SAMPLE_KEYS for s in ("mean", "min", "max")
-        ]
-
-    def file_row(self, row):
-        when = datetime.datetime.fromtimestamp(row[0] / 1000).isoformat(
-            timespec="seconds"
-        )
-        return [when, row[0]] + ["" if v is None else v for v in row[1:]]
 
     def add(self, sample):
         """Add a chart sample; returns the finished bucket row when a bucket
@@ -82,3 +69,13 @@ class Aggregator:
         cutoff = row[0] - self.keep_minutes * 60000
         while self.rows and self.rows[0][0] < cutoff:
             self.rows.popleft()
+
+    def reload(self, rows):
+        """Replace the finished rows with these (sorted, e.g. from the
+        database), keeping any held rows that are newer."""
+        last = rows[-1][0] if rows else None
+        newer = [r for r in self.rows if last is None or r[0] > last]
+        self.rows.clear()
+        for row in rows + newer:
+            if not self.rows or row[0] > self.rows[-1][0]:
+                self.append(row)

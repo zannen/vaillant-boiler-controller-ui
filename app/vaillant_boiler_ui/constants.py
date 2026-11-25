@@ -62,9 +62,14 @@ CHANGE_HISTORY = 500
 GAP_MS = 15000
 
 # Long chart windows use per-bucket summaries (mean/min/max of each sample
-# value), kept in memory and appended to <csv name>.<tier>.csv:
+# value), kept in memory and saved in the summaries table:
 # (name, bucket ms, minutes kept)
 TIERS = [
     ("1min", 60_000, 2 * 1440),
     ("15min", 15 * 60_000, 31 * 1440),
+]
+
+# summaries table columns after tier and ms: mean, min and max of each value
+SUMMARY_COLUMNS = [
+    f"{k}_{s}" for k in SAMPLE_KEYS for s in ("mean", "min", "max")
 ]

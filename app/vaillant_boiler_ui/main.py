@@ -1,8 +1,8 @@
-"""Poll ebusd for Vaillant BAI values, append them to a CSV file and serve a
-live web UI.
+"""Poll ebusd for Vaillant BAI values, save them in an SQLite database and
+serve a live web UI.
 
-Usage: vaillant-boiler-ui.py [CSV_PATH] --users HTPASSWD --roles ROLES
-           [--port 8000] [--changes PATH] [--ebusd HOST:PORT]
+Usage: vaillant-boiler-ui.py [DB_PATH] --users HTPASSWD --roles ROLES
+           [--port 8000] [--ebusd HOST:PORT]
            [--history-minutes 60] [--flush-seconds 30] [--secret-file PATH]
            [--token-hours 12] [--session-days 30]
 Then open http://<pi-address>:8000/ in a browser on the local network (add
@@ -16,22 +16,28 @@ highest; a user in none cannot log in):
     user: bob carol
     viewer: guest
 Needs the bcrypt module (Raspberry Pi OS: sudo apt install python3-bcrypt).
+
+Data from older versions (a logger CSV with its .changes.log, .1min.csv,
+.15min.csv and .commands.csv files, and schedule.json) is imported once,
+the logger CSV in the background while the program runs.
 """
 
 import argparse
 import os
 import signal
+import sqlite3
 import sys
-import time
 
 from .aggregator import Aggregator
 from .auth import Auth
 from .command_log import CommandLog
-from .constants import TIERS, VALUES
-from .csv_files import logger_row_ok, repair_csv, summary_row_ok, needs_header
-from .file_writer import FileWriter
+from .constants import TIERS
+from .csv_import import import_old_files
+from .csv_importer import CsvImporter
+from .db import open_database
+from .db_writer import DbWriter
 from .heating_controller import HeatingController
-from .history import backfill, load_agg, load_changes, load_history
+from .history import load_changes, load_history, load_summaries
 from .hub import Hub
 from .poller import poll
 from .schedule import Schedule
@@ -43,14 +49,22 @@ from .static_files import STATIC_DIR, load_static
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
-        "csv",
+        "db",
         nargs="?",
-        default=time.strftime("boiler-%Y%m%d-%H%M%S.csv"),
-        help="CSV file to append to",
+        default="boiler.db",
+        help="SQLite database for the logged data and the heating schedule, "
+        "created if missing (default: boiler.db)",
+    )
+    ap.add_argument(
+        "--import-csv",
+        help="logger CSV of an older version to import once, with its "
+        ".1min.csv, .15min.csv and .commands.csv files "
+        "(default: the database path with .csv)",
     )
     ap.add_argument(
         "--changes",
-        help="change log file (default: CSV path with .changes.log)",
+        help="change log of an older version to import once "
+        "(default: the import CSV path with .changes.log)",
     )
     ap.add_argument(
         "--bind",
@@ -76,7 +90,7 @@ def main():
         "--flush-seconds",
         type=float,
         default=30,
-        help="how often to write the CSV and change log to disk (default: 30)",
+        help="how often to write to the database (default: 30)",
     )
     ap.add_argument(
         "--users",
@@ -108,7 +122,8 @@ def main():
     )
     ap.add_argument(
         "--schedule",
-        help="heating schedule file (default: schedule.json next to the CSV)",
+        help="schedule.json of an older version to import once "
+        "(default: schedule.json next to the database)",
     )
     ap.add_argument(
         "--flow-temp",
@@ -139,7 +154,6 @@ def main():
         if err:
             ap.error(f"{option}: {err}")
     static = load_static(args.static_dir)
-    changes = args.changes or os.path.splitext(args.csv)[0] + ".changes.log"
     host, _, port = args.ebusd.rpartition(":")
     auth = Auth(
         args.users,
@@ -148,72 +162,47 @@ def main():
         int(args.token_hours * 3600),
         int(args.session_days * 86400),
     )
+    temps = {"flowTemp": args.flow_temp, "hwcTemp": args.hwc_temp}
+    csv_path = args.import_csv or os.path.splitext(args.db)[0] + ".csv"
+    try:
+        conn = open_database(args.db)
+        importing = import_old_files(
+            conn,
+            csv_path,
+            args.changes or os.path.splitext(csv_path)[0] + ".changes.log",
+            args.schedule
+            or os.path.join(
+                os.path.dirname(os.path.abspath(args.db)), "schedule.json"
+            ),
+            temps,
+        )
+    except (sqlite3.Error, RuntimeError) as e:
+        sys.exit(f"cannot use database {args.db}: {e}")
 
-    writer = FileWriter(args.csv, changes, args.flush_seconds)
-    base = os.path.splitext(args.csv)[0]
-    aggs = [
-        Aggregator(name, ms, keep, f"{base}.{name}.csv")
-        for name, ms, keep in TIERS
-    ]
-    for path, header, row_ok in (
-        [(args.csv, ["time"] + list(VALUES), logger_row_ok)]
-        + [(a.path, a.header(), summary_row_ok) for a in aggs]
-        + [(f"{base}.commands.csv", CommandLog.HEADER, summary_row_ok)]
-    ):
-        t0 = time.monotonic()
-        result = repair_csv(path, header, row_ok)
-        if result:
-            print(f"{result} ({time.monotonic() - t0:.0f} s)", file=sys.stderr)
+    writer = DbWriter(args.db, args.flush_seconds)
+    aggs = [Aggregator(name, ms, keep) for name, ms, keep in TIERS]
     hub = Hub(writer, args.history_minutes, aggs)
-    print(
-        f"loaded {load_history(hub, args.csv)} chart samples from {args.csv} "
-        f"and {load_changes(hub, changes)} changes from {changes}",
-        file=sys.stderr,
-    )
-    missing = []
+    hub.history.extend(load_history(conn, args.history_minutes))
+    hub.changes.extend(load_changes(conn))
     for a in aggs:
-        n = load_agg(a)
-        if n is None:
-            missing.append(a)
-        else:
-            print(
-                f"loaded {n} {a.name} summaries from {a.path}", file=sys.stderr
-            )
-        if needs_header(a.path):
-            writer.csv_row(a.header(), a.path)
-    # first run with summaries: build them from the existing CSV (one-off, may
-    # take a while)
-    if missing:
-        print(
-            f"building {', '.join(a.path for a in missing)} "
-            f"from {args.csv}...",
-            file=sys.stderr,
-        )
-        t0 = time.monotonic()
-        n = backfill(missing, args.csv, writer)
-        print(
-            f"read {n} samples in {time.monotonic() - t0:.0f} s; "
-            + ", ".join(f"{len(a.rows)} {a.name} summaries" for a in missing),
-            file=sys.stderr,
-        )
-    schedule = Schedule(
-        args.schedule
-        or os.path.join(
-            os.path.dirname(os.path.abspath(args.csv)), "schedule.json"
-        ),
-        {"flowTemp": args.flow_temp, "hwcTemp": args.hwc_temp},
-    )
-    commands = CommandLog(f"{base}.commands.csv", hub, writer)
+        a.reload(load_summaries(conn, a))
+    schedule = Schedule(conn, temps)
+    commands = CommandLog(hub, writer)
     print(
-        f"loaded {commands.load()} boiler instructions from {commands.path}",
+        f"loaded from {args.db}: {len(hub.history)} chart samples, "
+        f"{len(hub.changes)} changes, "
+        + ", ".join(f"{len(a.rows)} {a.name} summaries" for a in aggs)
+        + f", {commands.load(conn)} boiler instructions",
         file=sys.stderr,
     )
     controller = HeatingController(schedule, hub, commands, host, int(port))
     writer.start()
     controller.start()
     serve(hub, auth, controller, static, args.bind, args.port)
+    if importing:
+        CsvImporter(args.db, csv_path, hub).start()
     print(
-        f"web UI on port {args.port}; logging to {args.csv} and {changes} "
+        f"web UI on port {args.port}; saving to {args.db} "
         f"every {args.flush_seconds:g} s",
         file=sys.stderr,
     )

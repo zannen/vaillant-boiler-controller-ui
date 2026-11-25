@@ -1,9 +1,9 @@
 import datetime
 import json
-import os
 import sys
 import threading
 
+from .db import transaction
 from .schedule_rules import (
     DAY_KEYS,
     TEMP_LIMITS,
@@ -15,13 +15,14 @@ from .util import stamp
 
 class Schedule:
     """7-day heating schedule, and the heating flow and hot water
-    temperatures sent with it, kept in a JSON file and saved atomically.
+    temperatures sent with it, kept in the schedule and schedule_periods
+    tables.
 
-    temps holds the temperatures used until some are saved, e.g. from a file
-    written before they could be set: {"flowTemp": 75.0, "hwcTemp": 52.5}."""
+    temps holds the temperatures used until a schedule is saved:
+    {"flowTemp": 75.0, "hwcTemp": 52.5}."""
 
-    def __init__(self, path, temps):
-        self.path = path
+    def __init__(self, conn, temps):
+        self.conn = conn
         temps = {k: float(v) for k, v in temps.items()}
         self.lock = threading.Lock()
         self.data = {
@@ -31,21 +32,65 @@ class Schedule:
             "updatedBy": None,
             "updatedAt": None,
         }
-        if os.path.exists(path):
-            try:
-                with open(path) as f:
-                    saved = json.load(f)
-                checked, err = validate_schedule(saved)
-                if err:
-                    raise ValueError(err)
-                self.data = {
-                    **temps,
-                    **checked,
-                    "updatedBy": saved.get("updatedBy"),
-                    "updatedAt": saved.get("updatedAt"),
-                }
-            except (OSError, ValueError) as e:
-                sys.exit(f"cannot use schedule {path}: {e}; fix or delete it")
+        saved = self.read(conn)
+        if saved:
+            checked, err = validate_schedule(saved)
+            if err:
+                sys.exit(f"the heating schedule in the database is bad: {err}")
+            self.data = {
+                **temps,
+                **checked,
+                "updatedBy": saved["updatedBy"],
+                "updatedAt": saved["updatedAt"],
+            }
+
+    @staticmethod
+    def read(conn):
+        """The saved schedule, unchecked, or None if there is none."""
+        row = conn.execute(
+            "SELECT enabled, flow_temp, hwc_temp, updated_by, updated_at "
+            "FROM schedule"
+        ).fetchone()
+        if row is None:
+            return None
+        days = {d: [] for d in DAY_KEYS}
+        for day, start, stop in conn.execute(
+            "SELECT day, start, stop FROM schedule_periods ORDER BY start"
+        ):
+            days.setdefault(day, []).append([start, stop])
+        return {
+            "enabled": bool(row[0]),
+            "days": days,
+            "flowTemp": row[1],
+            "hwcTemp": row[2],
+            "updatedBy": row[3],
+            "updatedAt": row[4],
+        }
+
+    @staticmethod
+    def write(conn, data):
+        """Save a checked schedule with its temperatures; the caller holds a
+        transaction."""
+        conn.execute(
+            "INSERT OR REPLACE INTO schedule (id, enabled, flow_temp, "
+            "hwc_temp, updated_by, updated_at) VALUES (1, ?, ?, ?, ?, ?)",
+            (
+                int(data["enabled"]),
+                data["flowTemp"],
+                data["hwcTemp"],
+                data.get("updatedBy"),
+                data.get("updatedAt"),
+            ),
+        )
+        conn.execute("DELETE FROM schedule_periods")
+        conn.executemany(
+            "INSERT INTO schedule_periods (day, start, stop) VALUES (?, ?, ?)",
+            [
+                (day, start, stop)
+                for day, periods in data["days"].items()
+                for start, stop in periods
+            ],
+        )
 
     def get(self):
         with self.lock:
@@ -56,13 +101,9 @@ class Schedule:
         with self.lock:
             temps = {k: self.data[k] for k in TEMP_LIMITS}
         data = {**temps, **checked, "updatedBy": user, "updatedAt": stamp()}
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=1)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)
         with self.lock:
+            with transaction(self.conn):
+                self.write(self.conn, data)
             self.data = data
         return self.get()
 

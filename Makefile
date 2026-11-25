@@ -39,14 +39,18 @@ lint-yaml:
 	yamllint --strict .
 
 lint-py:
-	black --check --diff app
-	flake8 app
+	black --check --diff app tests
+	flake8 app tests
 	mypy app/vaillant-boiler-ui.py app/vaillant_boiler_ui
 	pylint app/vaillant-boiler-ui.py app/vaillant_boiler_ui
 
 .PHONY: format
 format:
-	black app
+	black app tests
+
+.PHONY: test
+test:
+	python3 -m pytest -q tests
 
 lint-web:
 	npm run lint
