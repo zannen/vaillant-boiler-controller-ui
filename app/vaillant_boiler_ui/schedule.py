@@ -22,6 +22,7 @@ class Schedule:
 
     def __init__(self, path, temps):
         self.path = path
+        temps = {k: float(v) for k, v in temps.items()}
         self.lock = threading.Lock()
         self.data = {
             "enabled": False,

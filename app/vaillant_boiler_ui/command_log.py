@@ -61,7 +61,9 @@ class CommandLog:
         if needs_header(self.path) and not self.rows:
             self.writer.csv_row(self.HEADER, self.path)
         self.writer.csv_row(
-            [when, ms, state, int(ok), result, source, *temps], self.path
+            [when, ms, state, int(ok), result, source]
+            + [f"{t:g}" for t in temps],
+            self.path,
         )
         row = [ms, state, int(ok), source, *temps]
         with self.lock:
