@@ -90,8 +90,11 @@ Every instruction, with what triggered it, is logged to `boiler.commands.csv`.
 
 - Set the boiler's own timer to be on whenever you *might* want heating: the app can switch heating off, but not on.
 - ebusd must allow writes: add `--accesslevel=*` to `EBUSD_OPTS` in `/etc/default/ebusd`.
-- The flow and hot water temperatures sent with each message default to 75 and 52.5 °C; change them with
-  `--flow-temp` and `--hwc-temp` in `BOILER_UI_OPTS`.
+- Each message also carries a heating flow and a hot water temperature, which admins set in the schedule
+  editor (heating flow 30–85 °C, hot water 35–65 °C, in 0.5 °C steps). A change is sent to the boiler at once.
+  They apply only while the schedule is enabled or an override is on; otherwise the boiler's own knobs apply.
+  The boiler's d.71 setting (75 °C unless changed) still caps the heating flow. Until an admin saves them,
+  75 and 52.5 °C are used; change those defaults with `--flow-temp` and `--hwc-temp` in `BOILER_UI_OPTS`.
 - If the app or the Pi stops, the boiler returns to its own controls within about 15 minutes.
 
 ## Development
