@@ -1,5 +1,6 @@
 import json
 import queue
+import sqlite3
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
@@ -220,7 +221,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             self.controller.schedule.set(checked, self.claims["sub"])
-        except OSError as e:
+        except sqlite3.Error as e:
             self._json(500, {"error": f"cannot save schedule: {e}"})
             return
         log(

@@ -3,10 +3,9 @@
 import time
 
 from .constants import VALUES
-from .csv_files import needs_header
 from .ebusd import Ebusd
 from .samples import number
-from .util import log, stamp
+from .util import epoch_ms, log, stamp
 
 
 def poll(hub, writer, host, port):
@@ -32,10 +31,6 @@ def poll(hub, writer, host, port):
                     rise = (t - prev_flow[1]) / (now - prev_flow[0])
                 prev_flow = (now, t)
 
-    if needs_header(
-        writer.csv_path
-    ):  # existing files already start with it (see repair_csv)
-        writer.csv_row(["time"] + names)
     while True:
         try:
             bus = bus or Ebusd(host, port)
@@ -49,7 +44,11 @@ def poll(hub, writer, host, port):
                     if VALUES[n] >= 30:
                         read(n)
             now = stamp()
-            writer.csv_row([now] + [last[n] for n in names])
+            writer.insert(
+                "samples",
+                ["ms", *names],
+                [epoch_ms()] + [last[n] or None for n in names],
+            )
             hub.publish(now, rise, True)
         except (OSError, ConnectionError) as e:
             log(f"ebusd error: {e}; retrying")

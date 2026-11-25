@@ -2,7 +2,7 @@ import collections
 import queue
 import threading
 
-from .constants import CHANGE_HISTORY, SAMPLE_KEYS
+from .constants import CHANGE_HISTORY, SAMPLE_KEYS, SUMMARY_COLUMNS
 from .samples import display, make_sample, significant
 from .util import epoch_ms
 
@@ -10,6 +10,9 @@ from .util import epoch_ms
 class Hub:
     """Latest values, chart history and recent changes, shared between the
     poller and the web clients."""
+
+    CHANGE_COLUMNS = ("ms", "time", "name", "old", "new")
+    SUMMARY_COLUMNS = ("tier", "ms", *SUMMARY_COLUMNS)
 
     def __init__(self, writer, history_minutes, aggs):
         self.aggs = aggs
@@ -103,9 +106,25 @@ class Hub:
             }
             self.changes.append(entry)
             self._broadcast({"type": "change", **entry})
-        self.writer.change(
-            f"{when}: {name}: {entry['old']} -> {entry['new']}\n"
+        self.writer.insert(
+            "changes",
+            self.CHANGE_COLUMNS,
+            (epoch_ms(), when, name, entry["old"], entry["new"]),
         )
+
+    def reload(self, history, summaries):
+        """Replace the chart history and summaries with these, loaded from
+        the database (e.g. once old CSV data has been imported), keeping held
+        rows newer than them, and send everyone a fresh snapshot.
+        summaries: tier name -> rows."""
+        with self.lock:
+            last = history[-1][0] if history else None
+            newer = [r for r in self.history if last is None or r[0] > last]
+            self.history.clear()
+            self.history.extend(history + newer)
+            for a in self.aggs:
+                a.reload(summaries.get(a.name, []))
+            self._broadcast(self.snapshot())
 
     def publish(self, when, rise, connected):
         ts = epoch_ms()
@@ -123,7 +142,9 @@ class Hub:
                 for a in self.aggs:
                     row = a.add(sample)
                     if row:
-                        self.writer.csv_row(a.file_row(row), a.path)
+                        self.writer.insert(
+                            "summaries", self.SUMMARY_COLUMNS, (a.name, *row)
+                        )
                         self._broadcast(
                             {"type": "bucket", "tier": a.name, "row": row}
                         )
